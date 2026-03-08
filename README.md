@@ -1,6 +1,8 @@
-> [!About this fork]
+> [!IMPORTANT]
 >
-> The modifications done in my fork is simple: 
+> **_About this fork_**
+>
+> The modifications done in my server fork are: 
 > 1. Provide an on-screen Latin Alphabet / English keyboard so I can do some basic keyentries on my ESP32 powered touch display.
 > 2. Create a Packet #6 that can send back the Current URL displayed on the screen back to the Client. This is safe to run on the server while the client does not have the code to process Packet #6 because there is a soft failsafe in the ESP32 Client code to ignore unknown packets
 
