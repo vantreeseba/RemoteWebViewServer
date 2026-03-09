@@ -36,6 +36,8 @@ This modification allows the user to know what webpage URL the display is curren
 
 If you build this server code without having my corresponding ESP32 Client code, then your ESP32 Client will show an unknown Packet #6 warning, but this warning can be safely ignored (or you can build your ESP32 device from my Client code too).
 
+My ESP32 client code is here: https://github.com/SleepinDevil/RemoteWebViewClient
+
 # Original description from Strange-V below
 
 [![Stand With Ukraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner-direct-single.svg)](https://stand-with-ukraine.pp.ua)
