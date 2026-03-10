@@ -2,23 +2,32 @@
  * ============================================================================
  * KIOSK VIRTUAL KEYBOARD - HOME ASSISTANT / CDP OPTIMIZED
  * ============================================================================
- * * HISTORY & TRIBULATIONS:
+ * * HISTORY & TRIBULATIONS (Developer Notes):
  * This script evolved through a brutal gauntlet of browser edge-cases:
  * 1. CDP Timing: Script had to be lazy-loaded to survive Single Page App (SPA) body wipes.
  * 2. Shadow DOM: Home Assistant's <ha-textfield> hid inputs from standard event targets.
  * 3. Rich Text / CodeMirror: HA's YAML editor required direct DOM execCommands and focus-kicking.
  * 4. The #top-layer Bug: HA's <dialog> elements sat above standard z-index. Solved via Popover API.
  * 5. Event Swallowing: HA's top-level components called stopPropagation() on clicks. Solved via Mathematical Hit-Testing.
- * 6. Ghost Clicks: Touchscreens firing rapid touchend/mousedown/click events caused through-clicks. Solved via 400ms Shield.
+ * 6. Closing Ghost Clicks: Rapid touchend/click events caused through-clicks. Solved via 400ms Shield.
  * 7. Websocket Jitter: Rapid double-taps over CDP/remote connections. Solved via 250ms Debounce.
  * 8. Enter Key vs SPA Forms: Forcing native form.submit() broke SPA API authentication sequences.
  * Solved by dispatching fully simulated keydown/keypress/keyup sequences.
- * 9. Opening Ghost Clicks: Tapping low inputs caused the trailing click to hit the newly spawned keyboard. 
+ * 9. Opening Ghost Clicks: Tapping low inputs caused the trailing click to instantly hit the spawned keyboard. 
  * Solved via 400ms Opening Shield to absorb residual touch events.
+ * 10. Ultimate Scalability: Fixed `px` values were removed. Width/Height are now global variables,
+ * and font sizes strictly scale to the Container Height using CSS `cqh` units and flexbox.
  */
 
 (function() {
     console.log('[VKB] Script injected. Initializing...');
+
+    // --- CONFIGURATION VARIABLES ---
+    // Scalability variables. Adjust these to fit your display (e.g., 720x1280 screens).
+    // The keyboard is fully responsive. Keys and font sizes will automatically 
+    // recalculate based on these two variables via flexbox and CSS container queries (cqh).
+    const VKB_WIDTH = '100%';    // Use a fixed width like '800px' on large horizontal displays.
+    const VKB_HEIGHT = '196px';  // Total keyboard vertical height. Default reflects the old 44px * 4 rows.
 
     // Prevent duplicate injections if CDP evaluates this script multiple times
     if (window.__kioskKeyboardInitialized) {
@@ -81,15 +90,18 @@
             
             // NOTE ON !IMPORTANT: Home Assistant uses aggressive global resets.
             // NOTE ON POPOVER: We use display: flex hooked to :popover-open to utilize the #top-layer API.
+            // NOTE ON SCALING: Container uses 'container-type: size' so fonts dynamically track VKB_HEIGHT.
             style.textContent = `
                 #kiosk-vkb-container {
                     position: fixed !important;
                     top: auto !important;
-                    bottom: -500px !important;
+                    bottom: -200vh !important; /* Forces off screen entirely regardless of height */
                     left: 0 !important;
                     right: 0 !important;
-                    margin: 0 !important;
-                    width: 100% !important;
+                    margin: 0 auto !important; /* Centers horizontally if width < 100% */
+                    width: ${VKB_WIDTH} !important;
+                    height: ${VKB_HEIGHT} !important;
+                    container-type: size; /* Enables CQH font scaling */
                     background: #1e1e1e;
                     border-top: 2px solid #333;
                     z-index: 2147483647;
@@ -115,18 +127,18 @@
                     margin-bottom: 4px;
                     width: 100%;
                     gap: 4px;
+                    flex: 1; /* Automatically stretches height evenly */
                 }
                 .vkb-row:last-child {
                     margin-bottom: 0;
                 }
                 .vkb-key {
-                    flex: 1;
-                    height: 44px;
+                    flex: 1; /* Automatically stretches width evenly */
                     background: #383838;
                     color: #f8f8f2;
                     border: 1px solid #2a2a2a;
                     border-radius: 2px;
-                    font-size: 1.4rem;
+                    font-size: 11.5cqh; /* Scales precisely to parent container height */
                     font-weight: normal;
                     cursor: pointer;
                     display: flex;
@@ -135,15 +147,15 @@
                     padding: 0;
                 }
                 .vkb-key:active { background: #555555; }
-                .vkb-key-layout { background: #324a5f; color: #e2e8f0; font-size: 1.1rem; }
+                .vkb-key-layout { background: #324a5f; color: #e2e8f0; font-size: 9cqh; }
                 .vkb-key-layout:active { background: #233544; }
-                .vkb-key-special { background: #485c4a; color: #e2e8f0; font-size: 1.3rem; }
+                .vkb-key-special { background: #485c4a; color: #e2e8f0; font-size: 11cqh; }
                 .vkb-key-special:active { background: #364538; }
-                .vkb-key-large-icon { font-size: 1.8rem; }
-                .vkb-key-backspace { font-size: 2.2rem; }
-                .vkb-key-hide { background: #8b3a3a; color: #e2e8f0; font-size: 1.5rem; }
+                .vkb-key-large-icon { font-size: 15cqh; }
+                .vkb-key-backspace { font-size: 18cqh; }
+                .vkb-key-hide { background: #8b3a3a; color: #e2e8f0; font-size: 12.5cqh; }
                 .vkb-key-hide:active { background: #6b2a2a; }
-                .vkb-key-enter { background: #E95420; color: #ffffff; border-color: #c94618; font-size: 1.5rem; }
+                .vkb-key-enter { background: #E95420; color: #ffffff; border-color: #c94618; font-size: 12.5cqh; }
                 .vkb-key-enter:active { background: #c94618; }
                 .vkb-key-space { flex: 3; }
                 .vkb-key-arrow { flex: 0.8; }
@@ -308,7 +320,6 @@
             case '⏎':
                 if (activeInput.isContentEditable) {
                     document.execCommand('insertParagraph', false, null);
-                    // Explicitly notify that content changed
                     activeInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
                 } else if (activeInput.tagName === 'TEXTAREA') {
                     insertText('\n');
@@ -377,7 +388,7 @@
     function hideKeyboard() {
         console.log('[VKB] hideKeyboard triggered. Activating ghost-click shield.');
         
-        // GHOST-CLICK SHIELD TRIGGER
+        // CLOSING GHOST-CLICK SHIELD TRIGGER
         // Touch screens send a delayed "click" event after pointerdown. We set a 400ms 
         // deadzone to prevent that click from falling through to HA elements beneath us.
         window.__vkbClosingShield = Date.now();
@@ -462,7 +473,7 @@
     interactionEvents.forEach(ev => {
         document.addEventListener(ev, function(e) {
             
-            // 1. Ghost-Click Shield (Active for 400ms after closing)
+            // 1. Closing Ghost-Click Shield (Active for 400ms after closing)
             if (window.__vkbClosingShield && (Date.now() - window.__vkbClosingShield < 400)) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -492,7 +503,7 @@
                     e.stopPropagation();
                     e.stopImmediatePropagation();
 
-                    // OPENING SHIELD CHECK: Ignore keys if the keyboard JUST appeared
+                    // 3. Opening Ghost-Click Shield (Active for 400ms after spawning)
                     if (window.__vkbOpeningShield && (Date.now() - window.__vkbOpeningShield < 400)) {
                         return;
                     }
@@ -500,7 +511,7 @@
                     // Only process keypress logic on the initial down-touch
                     if (['pointerdown', 'touchstart', 'mousedown', 'click'].includes(ev)) {
                         
-                        // 3. The Websocket Jitter Debounce
+                        // 4. The Websocket Jitter Debounce
                         // Prevent rapid double-clicks from misfiring the same key.
                         if (window.__vkbLastTap && (Date.now() - window.__vkbLastTap < 250)) return;
                         window.__vkbLastTap = Date.now();
@@ -519,10 +530,10 @@
                         if (foundKey) {
                             const key = foundKey.dataset.key;
                             
-                            // Visual Feedback (Clean style reset)
+                            // Visual Feedback (Clean style reset to fix sticking bugs)
                             foundKey.style.background = '#555';
                             setTimeout(() => {
-                                foundKey.style.background = ''; // Wipe inline style to revert to CSS classes
+                                foundKey.style.background = ''; // Wipe inline style to revert to CSS class default
                             }, 100);
                             
                             processKey(key);
@@ -531,7 +542,7 @@
                     return; // Exit out of the interaction listener
                 }
 
-                // 4. Outside Click Detection (Hide trigger)
+                // 5. Outside Click Detection (Hide trigger)
                 // If we reach here, the user tapped OUTSIDE the geographic bounds of the keyboard.
                 if (ev === 'pointerdown') {
                     const path = e.composedPath ? e.composedPath() : [e.target];
@@ -548,6 +559,6 @@
         }, true); // useCapture: true is REQUIRED to beat the SPA event delegation
     });
 
-    console.log('[VKB] Initialization complete (Global Capture Bypass, Mathematical Hit-Test & Popover Bumping).');
+    console.log('[VKB] Initialization complete (Fully Scalable, Ghost-Click Shield Active).');
 
 })();
