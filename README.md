@@ -58,8 +58,8 @@ services:
       DEBUG_PORT: 9221 # internal debug port
       HEALTH_PORT: 18080
       PREFERS_REDUCED_MOTION: false
-      KEYBOARD_SCRIPT_URL: "https://example.com/keyboard.js"
-      KEYBOARD_SCRIPT_ALLOW_HTTP: false
+      INJECT_JS_URL: "https://example.com/keyboard.js"
+      INJECT_JS_ALLOW_HTTP: false
       USER_DATA_DIR: /pw-data
       BROWSER_LOCALE: "en-US"
     ports:
@@ -93,15 +93,11 @@ services:
       - "TCP:127.0.0.1:9221"
 ```
 
-## Optional keyboard script
+## On-screen keyboard
 
-If you need an on-screen keyboard, the server can inject a JavaScript file loaded from a direct URL.
+The server does not include a built-in on-screen keyboard, but you can inject any external JavaScript file into every page it renders — including a virtual keyboard of your choice.
 
-- `KEYBOARD_SCRIPT_URL` (empty by default): direct URL to a JavaScript file. If set, script injection is enabled.
-- `KEYBOARD_SCRIPT_ALLOW_HTTP` (`false` by default): allow plain HTTP URLs (HTTPS is recommended).
+- `INJECT_JS_URL` (empty by default): direct HTTPS URL to a JavaScript file. If set, the script is fetched once on startup and injected into every new page via `Page.addScriptToEvaluateOnNewDocument`.
+- `INJECT_JS_ALLOW_HTTP` (`false` by default): allow plain HTTP URLs (HTTPS is strongly recommended).
 
-Behavior notes:
-
-- Download timeout is fixed at 5 seconds.
-- If loading fails, streaming continues and keyboard injection is skipped.
-- The downloaded script is cached in memory per server process.
+> **Security notice:** The injected script runs with full access to every page the server renders, including any active sessions, credentials, and cookies. Only use scripts from sources you fully trust. Never point this at a URL controlled by a third party.

@@ -15,7 +15,7 @@ export type DeviceConfig = {
   rotation: Rotation;               // degrees
 };
 
-export type KeyboardScriptConfig = {
+export type InjectScriptConfig = {
   url?: string;
   allowHttp: boolean;
 };
@@ -179,10 +179,10 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
   console.info(`${head}\n${body}`);
 }
 
-export function readKeyboardScriptConfig(): KeyboardScriptConfig {
-  const urlRaw = env.get("KEYBOARD_SCRIPT_URL").asString();
+export function readInjectScriptConfig(): InjectScriptConfig {
+  const urlRaw = env.get("INJECT_JS_URL").asString();
   const url = urlRaw && urlRaw.trim() !== "" ? urlRaw.trim() : undefined;
-  const allowHttpRaw = env.get("KEYBOARD_SCRIPT_ALLOW_HTTP").asString();
+  const allowHttpRaw = env.get("INJECT_JS_ALLOW_HTTP").asString();
   const allowHttp = parseBool(allowHttpRaw, false);
 
   return {

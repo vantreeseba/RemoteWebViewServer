@@ -1,12 +1,12 @@
 import { CDPSession } from "playwright-core";
 import sharp from "sharp";
-import { DeviceConfig, deviceConfigsEqual, readKeyboardScriptConfig } from "./config.js";
+import { DeviceConfig, deviceConfigsEqual, readInjectScriptConfig } from "./config.js";
 import { getRoot } from "./cdpRoot.js";
 import { FrameProcessor } from "./frameProcessor.js";
 import { DeviceBroadcaster } from "./broadcaster.js";
 import { hash32 } from "./util.js";
 import { SelfTestRunner } from "./selfTest.js";
-import { getKeyboardScriptFromDirectUrl } from "./keyboardLoader.js";
+import { getInjectScriptFromUrl } from "./scriptLoader.js";
 
 export type DeviceSession = {
   id: string;
@@ -74,7 +74,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     });
   }
 
-  const keyboardScript = await getKeyboardScriptFromDirectUrl(readKeyboardScriptConfig());
+  const keyboardScript = await getInjectScriptFromUrl(readInjectScriptConfig());
   if (keyboardScript) {
     await session.send('Page.addScriptToEvaluateOnNewDocument', { source: keyboardScript });
   }

@@ -1,4 +1,4 @@
-import { KeyboardScriptConfig } from "./config.js";
+import { InjectScriptConfig } from "./config.js";
 
 let cachedUrl: string | undefined;
 let cachedScript: string | undefined;
@@ -9,9 +9,9 @@ function isAllowedProtocol(url: URL, allowHttp: boolean): boolean {
   return false;
 }
 
-export async function getKeyboardScriptFromDirectUrl(cfg: KeyboardScriptConfig): Promise<string | undefined> {
+export async function getInjectScriptFromUrl(cfg: InjectScriptConfig): Promise<string | undefined> {
   if (!cfg.url) {
-    console.warn("[keyboard] KEYBOARD_SCRIPT_URL is not set; keyboard injection skipped");
+    console.warn("[inject] INJECT_JS_URL is not set; script injection skipped");
     return undefined;
   }
 
@@ -23,17 +23,17 @@ export async function getKeyboardScriptFromDirectUrl(cfg: KeyboardScriptConfig):
   try {
     parsedUrl = new URL(cfg.url);
   } catch {
-    console.warn("[keyboard] Invalid KEYBOARD_SCRIPT_URL; keyboard injection skipped");
+    console.warn("[inject] Invalid INJECT_JS_URL; script injection skipped");
     return undefined;
   }
 
   if (!isAllowedProtocol(parsedUrl, cfg.allowHttp)) {
-    console.warn("[keyboard] KEYBOARD_SCRIPT_URL must use https (or http when KEYBOARD_SCRIPT_ALLOW_HTTP=true)");
+    console.warn("[inject] INJECT_JS_URL must use https (or http when INJECT_JS_ALLOW_HTTP=true)");
     return undefined;
   }
 
   if (typeof fetch !== "function") {
-    console.warn("[keyboard] fetch is not available in this Node runtime; keyboard injection skipped");
+    console.warn("[inject] fetch is not available in this Node runtime; script injection skipped");
     return undefined;
   }
 
@@ -51,14 +51,14 @@ export async function getKeyboardScriptFromDirectUrl(cfg: KeyboardScriptConfig):
     });
 
     if (!response.ok) {
-      console.warn(`[keyboard] Failed to download script: HTTP ${response.status}; keyboard injection skipped`);
+      console.warn(`[inject] Failed to download script: HTTP ${response.status}; script injection skipped`);
       return undefined;
     }
 
     const bytes = Buffer.from(await response.arrayBuffer());
     const script = bytes.toString("utf8");
     if (!script.trim()) {
-      console.warn("[keyboard] Downloaded script is empty; keyboard injection skipped");
+      console.warn("[inject] Downloaded script is empty; script injection skipped");
       return undefined;
     }
 
@@ -67,7 +67,7 @@ export async function getKeyboardScriptFromDirectUrl(cfg: KeyboardScriptConfig):
     return script;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[keyboard] Failed to download script: ${message}; keyboard injection skipped`);
+    console.warn(`[inject] Failed to download script: ${message}; script injection skipped`);
     return undefined;
   } finally {
     clearTimeout(timeout);
