@@ -36,6 +36,8 @@ options:
   debug_proxy_port: 9222
   health_port: 18080
   prefers_reduced_motion: false
+  inject_js_url: ""
+  inject_js_allow_http: false
   user_data_dir: "/pw-data"
 
 schema:
@@ -53,4 +55,6 @@ schema:
   debug_proxy_port: int
   health_port: int
   prefers_reduced_motion: bool
+  inject_js_url: str
+  inject_js_allow_http: bool
   user_data_dir: str
