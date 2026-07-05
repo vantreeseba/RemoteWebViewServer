@@ -1,0 +1,76 @@
+# Performance TODO
+
+Findings from the 2026-07-05 performance review, ranked by impact.
+
+## Critical — memory / dead work under realistic client conditions
+
+- [ ] **1. WebSocket backpressure** (`src/broadcaster.ts`): `_drainAsync` calls
+  `ws.send()` without checking `bufferedAmount` or using the send callback, so a
+  slow client buffers unboundedly in process memory. The `await Promise.resolve()`
+  between packets only yields to the microtask queue (no real pacing); queued
+  frames are never coalesced, so slow clients receive stale intermediates;
+  `addClient` supersedes old sockets with `close()` (graceful handshake behind
+  buffered megabytes) instead of `terminate()`.
+  Fix: await the `ws.send` callback per packet, cap the frame queue and drop +
+  request a full frame on overflow, `terminate()` superseded sockets.
+- [ ] **2. CDP session leak on reconfigure** (`src/cdpRoot.ts`,
+  `src/deviceManager.ts`): `CdpConnection.sessions` never deletes entries;
+  `deleteDeviceAsync` closes the target but never releases the session, leaking
+  the `CdpSession`, its handlers, and the captured `DeviceSession` graph
+  (processor state, possibly the last pending base64 PNG) on every
+  reconfigure/idle-cleanup cycle.
+  Fix: `releaseSession(sessionId)` on the root, called from `deleteDeviceAsync`.
+- [ ] **3. Screencast runs with zero clients / dead sockets**
+  (`src/deviceManager.ts`, `src/index.ts`): frames are ACK'd but Chromium keeps
+  compositing + PNG-encoding for the full 5-min idle TTL after the last client
+  leaves; a client that vanishes without FIN stays `readyState OPEN` (no
+  ping/pong liveness), keeping the whole pipeline encoding for a dead peer.
+  Fix: `Page.stopScreencast` when client count hits zero, restart on reconnect;
+  server-initiated ping/pong that terminates unresponsive sockets.
+- [ ] **4. Throttle race → concurrent frame processing**
+  (`src/deviceManager.ts`): `flushPending` clears `throttleTimer` on entry but
+  updates `lastProcessedMs` only in `finally`, so a frame arriving mid-processing
+  schedules a second concurrent `flushPending` exactly when processing time
+  approaches `minFrameInterval`.
+  Fix: a `processing` flag; re-arm the timer on completion if a frame is pending.
+
+## Hot path — per-frame CPU and allocation churn
+
+- [ ] **5. Per-tile alloc+copy just to hash** (`src/frameProcessor.ts`):
+  `_extractRaw` (alloc + row-by-row memcpy) runs for every tile every frame
+  solely to feed `hash32`; ~375 allocs / ~1.5 MB memcpy per 800×480 frame,
+  discarded immediately.
+  Fix: hash tiles in place with a strided walk over the frame buffer.
+- [ ] **6. Serialized JPEG encodes** (`src/frameProcessor.ts`): full-frame,
+  partial-frame, and red-replacement paths `await` each `_encode` in a loop,
+  paying sum-of-encodes instead of max-of-encodes despite `sharp.concurrency`.
+  Fix: `Promise.all` the rect encodes.
+- [ ] **7. `ensureAlpha()` inflates every frame by 33%**
+  (`src/deviceManager.ts`, `src/frameProcessor.ts`): screencast PNGs are opaque;
+  forcing RGBA grows every downstream copy/hash/encode.
+  Fix: drop `ensureAlpha`, parameterize the processor on `info.channels`.
+- [ ] **8. Red placeholder re-encoded every time** (`src/frameProcessor.ts`):
+  `_makeRedFrameAsync` allocates, fills, and JPEG-encodes a deterministic buffer
+  on every oversized tile — potentially every frame on busy pages.
+  Fix: memoize by `${w}x${h}:${enc}`.
+- [ ] **9. `buildFramePacket` extra copy** (`src/protocol.ts`): header-per-tile
+  allocs + `Buffer.concat` cost a full redundant memcpy of the payload per packet.
+  Fix: compute exact size, `allocUnsafe` once, write in place.
+
+## Lower priority
+
+- [ ] **10. Failed inject-script fetches never negatively cached**
+  (`src/scriptLoader.ts`): an unreachable `INJECT_JS_URL` adds up to 5 s to every
+  device (re)connect, serialized inside `ensureDeviceAsync`.
+  Fix: negative-cache failures with a short TTL; warm the cache at startup.
+- [ ] **11. Self-test timers survive device deletion**
+  (`src/deviceManager.ts`): `deleteDeviceAsync` never calls
+  `selfTestRunner.stop()`; up to three timers (5s/70s/125s) retain the runner and
+  can push stale FrameStats packets into a new session reusing the same id.
+- [ ] **12. Device setup serializes independent CDP round trips**
+  (`src/deviceManager.ts`): `Page.enable`, metrics override, emulated media, and
+  the script fetch are awaited sequentially; ~10–25 ms avoidable per (re)connect.
+  Fix: kick off the script fetch early, `Promise.all` the independent commands.
+- [ ] **13. Config store never evicts** (`src/config.ts`): one entry per unique
+  `?id=` forever — and `getConfigFor` has no callers at all, so the store is
+  write-only dead memory. Fix: remove the store.
