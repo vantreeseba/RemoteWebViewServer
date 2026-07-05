@@ -35,7 +35,18 @@ let _cleanupRunning = false;
 export const broadcaster = new DeviceBroadcaster();
 // Deltas are only valid in sequence; after the broadcaster drops frames for
 // a lagging client, resync it with a full frame.
-broadcaster.onFramesDropped = (id) => devices.get(id)?.processor.requestFullFrame();
+broadcaster.onFramesDropped = (id) => {
+  const dev = devices.get(id);
+  if (dev) requestDeviceFullFrame(dev);
+};
+
+// A full-frame request must also clear the device-level PNG dedup hash:
+// on a static page the next screencast frame is byte-identical to the last
+// processed one, and the dedup would silently swallow the requested frame.
+function requestDeviceFullFrame(dev: DeviceSession): void {
+  dev.prevFrameHash = 0;
+  dev.processor.requestFullFrame();
+}
 // Without a screencast consumer Chromium still composites and PNG-encodes
 // every frame; stop it while nobody is watching (restarted on reconnect).
 broadcaster.onClientCountZero = (id) => {
@@ -62,7 +73,7 @@ async function pauseScreencastAsync(id: string): Promise<void> {
   // applies commands in order — make sure the stream is running again.
   if (broadcaster.getClientCount(id) > 0 && devices.get(id) === dev) {
     await dev.cdp.send('Page.startScreencast', screencastParams(dev.cfg));
-    dev.processor.requestFullFrame();
+    requestDeviceFullFrame(dev);
   }
 }
 
@@ -77,7 +88,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       // Screencast may be paused from a zero-client period; (re)starting is
       // idempotent and the client needs a full frame either way.
       await device.cdp.send('Page.startScreencast', screencastParams(cfg));
-      device.processor.requestFullFrame();
+      requestDeviceFullFrame(device);
       return device;
     } else {
       console.log(`[device] Reconfiguring device ${id}`);
@@ -153,7 +164,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     processing: false,
   };
   devices.set(id, newDevice);
-  newDevice.processor.requestFullFrame();
+  requestDeviceFullFrame(newDevice);
 
   const flushPending = async () => {
     const dev = newDevice;

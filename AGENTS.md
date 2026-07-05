@@ -18,7 +18,7 @@ image and a Home Assistant OS add-on (`hassio/`).
 | Browser   | Headless Chromium via `playwright-core` + raw CDP WebSocket  |
 | Imaging   | `sharp` (rotate, raw RGBA extraction, JPEG encode)           |
 | Transport | `ws` WebSocket server, custom binary protocol (v1)           |
-| Hashing   | Hand-rolled sampling FNV-1a (`hash32` in `src/util.ts`) for frame/tile change detection; `xxhash-wasm` is a declared but currently unused dependency |
+| Hashing   | Hand-rolled sampling FNV-1a: `hash32` (`src/util.ts`) for whole-frame PNG dedup, `_hashTile` (`src/frameProcessor.ts`) for in-place tile change detection; `xxhash-wasm` is a declared but currently unused dependency |
 | Config    | `env-var` + query-string params per client connection        |
 | Testing   | Vitest                                                       |
 | Deploy    | Docker (Playwright base image), Home Assistant add-on        |

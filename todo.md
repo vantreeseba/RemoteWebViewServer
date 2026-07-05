@@ -57,6 +57,16 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   allocs + `Buffer.concat` cost a full redundant memcpy of the payload per packet.
   Fix: compute exact size, `allocUnsafe` once, write in place.
 
+## Found and fixed during verification
+
+- [x] **A. Device setup errors crashed the whole server**: an exception in the
+  async `wss.on("connection")` handler (bad params, CDP failure) was an
+  unhandled rejection that killed the process for all devices.
+- [x] **B. Full-frame requests swallowed by PNG dedup on static pages**: a
+  (re)connecting client's requested full frame was dropped because the next
+  screencast frame is byte-identical to the last processed one; full-frame
+  requests now also reset the device-level dedup hash.
+
 ## Lower priority
 
 - [x] **10. Failed inject-script fetches never negatively cached**
