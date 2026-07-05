@@ -11,6 +11,7 @@ import { getInjectScriptFromUrl } from "./scriptLoader.js";
 export type DeviceSession = {
   id: string;
   deviceId: string;
+  sessionId: string;
   cdp: CDPSession;
   cfg: DeviceConfig;
   url: string;
@@ -101,6 +102,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   const newDevice: DeviceSession = {
     id: targetId,
     deviceId: id,
+    sessionId,
     cdp: session,
     cfg: cfg,
     url: '',
@@ -221,7 +223,9 @@ async function deleteDeviceAsync(device: DeviceSession) {
 
   if (device.throttleTimer)
     clearTimeout(device.throttleTimer);
+  device.selfTestRunner.stop();
 
   try { await device.cdp.send("Page.stopScreencast").catch(() => { }); } catch { }
   try { await root?.send("Target.closeTarget", { targetId: device.id }); } catch { }
+  root?.releaseSession(device.sessionId);
 }

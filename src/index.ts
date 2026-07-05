@@ -1,7 +1,7 @@
 import http from 'http';
 import { WebSocketServer } from "ws"
 import env from "env-var";
-import { makeConfigFromParams, setConfigFor, logDeviceConfig } from "./config.js";
+import { makeConfigFromParams, logDeviceConfig } from "./config.js";
 import { broadcaster, ensureDeviceAsync, cleanupIdleAsync } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
@@ -41,7 +41,6 @@ wss.on("connection", async (ws, req) => {
   const id = url.searchParams.get("id") || "default";
 
   const cfg = makeConfigFromParams(url.searchParams);
-  setConfigFor(id, cfg);
   logDeviceConfig(id, cfg);
 
   broadcaster.addClient(id, ws);

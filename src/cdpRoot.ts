@@ -54,6 +54,12 @@ class CdpConnection {
     return s;
   }
 
+  // Sessions are never removed otherwise; without this, every closed target
+  // leaks its CdpSession, its handlers, and the device state they capture.
+  releaseSession(sessionId: string): void {
+    this.sessions.delete(sessionId);
+  }
+
   private _onMessage(data: WebSocket.RawData) {
     const msg = JSON.parse(String(data)) as CdpMsg;
     // Route session-scoped events

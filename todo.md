@@ -13,7 +13,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   buffered megabytes) instead of `terminate()`.
   Fix: await the `ws.send` callback per packet, cap the frame queue and drop +
   request a full frame on overflow, `terminate()` superseded sockets.
-- [ ] **2. CDP session leak on reconfigure** (`src/cdpRoot.ts`,
+- [x] **2. CDP session leak on reconfigure** (`src/cdpRoot.ts`,
   `src/deviceManager.ts`): `CdpConnection.sessions` never deletes entries;
   `deleteDeviceAsync` closes the target but never releases the session, leaking
   the `CdpSession`, its handlers, and the captured `DeviceSession` graph
@@ -63,7 +63,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   (`src/scriptLoader.ts`): an unreachable `INJECT_JS_URL` adds up to 5 s to every
   device (re)connect, serialized inside `ensureDeviceAsync`.
   Fix: negative-cache failures with a short TTL; warm the cache at startup.
-- [ ] **11. Self-test timers survive device deletion**
+- [x] **11. Self-test timers survive device deletion**
   (`src/deviceManager.ts`): `deleteDeviceAsync` never calls
   `selfTestRunner.stop()`; up to three timers (5s/70s/125s) retain the runner and
   can push stale FrameStats packets into a new session reusing the same id.
@@ -71,6 +71,6 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   (`src/deviceManager.ts`): `Page.enable`, metrics override, emulated media, and
   the script fetch are awaited sequentially; ~10–25 ms avoidable per (re)connect.
   Fix: kick off the script fetch early, `Promise.all` the independent commands.
-- [ ] **13. Config store never evicts** (`src/config.ts`): one entry per unique
+- [x] **13. Config store never evicts** (`src/config.ts`): one entry per unique
   `?id=` forever — and `getConfigFor` has no callers at all, so the store is
   write-only dead memory. Fix: remove the store.
