@@ -5,15 +5,26 @@ import type { FrameOut } from "./frameProcessor.js";
 type OutFrame = { frameId?: number | null; packets: Buffer[] };
 type BroadcasterState = { queue: OutFrame[]; sending: boolean };
 
+// Frames a slow client may fall behind before we drop queued frames and
+// request a fresh full frame instead of streaming stale deltas.
+const MAX_QUEUED_FRAMES = 2;
+
 export class DeviceBroadcaster {
   private _clients = new Map<string, Set<WebSocket>>();
   private _state = new Map<string, BroadcasterState>();
 
+  // Called when queued frames were dropped for a device (slow client); the
+  // device should request a full frame so the client resyncs.
+  public onFramesDropped?: (id: string) => void;
+
   addClient(id: string, ws: WebSocket): void {
     const old = this._clients.get(id);
     if (old && old.size) {
+      // The replacement client makes old connections worthless; terminate()
+      // frees their buffered data immediately instead of queueing a close
+      // handshake behind it.
       for (const sock of old) {
-        try { sock.close(); } catch {}
+        try { sock.terminate(); } catch {}
       }
       old.clear();
     }
@@ -44,10 +55,23 @@ export class DeviceBroadcaster {
   public sendFrameChunked(id: string, data: FrameOut, frameId: number, maxBytes = 12_000): void {
     const peers = this._clients.get(id);
     if (!peers || peers.size === 0 || data.rects.length === 0) return;
-
-    const packets = buildFramePackets(data.rects, data.encoding, frameId, data.isFullFrame, maxBytes);
+    if (![...peers].some(ws => ws.readyState === WebSocket.OPEN)) return;
 
     const st = this._ensureState(id);
+
+    const queuedFrames = st.queue.filter(f => f.frameId != null).length;
+    if (queuedFrames >= MAX_QUEUED_FRAMES) {
+      // Client can't keep up: drop queued frames (keeping control packets)
+      // and this one too — deltas are only valid in sequence, so ask the
+      // device for a full frame to resync instead.
+      const control = st.queue.filter(f => f.frameId == null);
+      st.queue.length = 0;
+      st.queue.push(...control);
+      this.onFramesDropped?.(id);
+      return;
+    }
+
+    const packets = buildFramePackets(data.rects, data.encoding, frameId, data.isFullFrame, maxBytes);
     st.queue.push({ frameId, packets });
     this._drainAsync(id).catch(() => {});
   }
@@ -82,6 +106,19 @@ export class DeviceBroadcaster {
     return st;
   }
 
+  // Resolves true when the packet has been flushed to the socket, false on
+  // send error — this is what paces the drain loop to the client's real
+  // throughput instead of buffering unboundedly in ws.
+  private _sendAsync(ws: WebSocket, pkt: Buffer): Promise<boolean> {
+    return new Promise(resolve => {
+      try {
+        ws.send(pkt, { binary: true }, err => resolve(!err));
+      } catch {
+        resolve(false);
+      }
+    });
+  }
+
   private async _drainAsync(id: string): Promise<void> {
     const st = this._ensureState(id);
     if (st.sending) return;
@@ -94,21 +131,21 @@ export class DeviceBroadcaster {
       while (st.queue.length) {
         const f = st.queue.shift()!;
         for (const pkt of f.packets) {
+          const targets: WebSocket[] = [];
           for (const ws of new Set(peers)) {
-            if (ws.readyState !== WebSocket.OPEN) {
-              peers.delete(ws);
-              continue;
-            }
-            try {
-              ws.send(pkt, { binary: true });
-            } catch {
-              // drop on send error
-              try { ws.close(); } catch {}
-              peers.delete(ws);
+            if (ws.readyState === WebSocket.OPEN) targets.push(ws);
+            else peers.delete(ws);
+          }
+          if (targets.length === 0) { st.queue.length = 0; return; }
+
+          const results = await Promise.all(targets.map(ws => this._sendAsync(ws, pkt)));
+          for (let i = 0; i < targets.length; i++) {
+            if (!results[i]) {
+              try { targets[i].terminate(); } catch {}
+              peers.delete(targets[i]);
             }
           }
           if (peers.size === 0) { st.queue.length = 0; return; }
-          await Promise.resolve();
         }
       }
     } finally {

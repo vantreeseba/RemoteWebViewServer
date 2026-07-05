@@ -31,6 +31,9 @@ const PREFERS_REDUCED_MOTION = /^(1|true|yes|on)$/i.test(process.env.PREFERS_RED
 const devices = new Map<string, DeviceSession>();
 let _cleanupRunning = false;
 export const broadcaster = new DeviceBroadcaster();
+// Deltas are only valid in sequence; after the broadcaster drops frames for
+// a lagging client, resync it with a full frame.
+broadcaster.onFramesDropped = (id) => devices.get(id)?.processor.requestFullFrame();
 
 export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
   const root = getRoot();

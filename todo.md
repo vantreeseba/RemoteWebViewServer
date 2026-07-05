@@ -4,7 +4,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
 
 ## Critical — memory / dead work under realistic client conditions
 
-- [ ] **1. WebSocket backpressure** (`src/broadcaster.ts`): `_drainAsync` calls
+- [x] **1. WebSocket backpressure** (`src/broadcaster.ts`): `_drainAsync` calls
   `ws.send()` without checking `bufferedAmount` or using the send callback, so a
   slow client buffers unboundedly in process memory. The `await Promise.resolve()`
   between packets only yields to the microtask queue (no real pacing); queued
