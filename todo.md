@@ -36,12 +36,12 @@ Findings from the 2026-07-05 performance review, ranked by impact.
 
 ## Hot path — per-frame CPU and allocation churn
 
-- [ ] **5. Per-tile alloc+copy just to hash** (`src/frameProcessor.ts`):
+- [x] **5. Per-tile alloc+copy just to hash** (`src/frameProcessor.ts`):
   `_extractRaw` (alloc + row-by-row memcpy) runs for every tile every frame
   solely to feed `hash32`; ~375 allocs / ~1.5 MB memcpy per 800×480 frame,
   discarded immediately.
   Fix: hash tiles in place with a strided walk over the frame buffer.
-- [ ] **6. Serialized JPEG encodes** (`src/frameProcessor.ts`): full-frame,
+- [x] **6. Serialized JPEG encodes** (`src/frameProcessor.ts`): full-frame,
   partial-frame, and red-replacement paths `await` each `_encode` in a loop,
   paying sum-of-encodes instead of max-of-encodes despite `sharp.concurrency`.
   Fix: `Promise.all` the rect encodes.
@@ -49,7 +49,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   (`src/deviceManager.ts`, `src/frameProcessor.ts`): screencast PNGs are opaque;
   forcing RGBA grows every downstream copy/hash/encode.
   Fix: drop `ensureAlpha`, parameterize the processor on `info.channels`.
-- [ ] **8. Red placeholder re-encoded every time** (`src/frameProcessor.ts`):
+- [x] **8. Red placeholder re-encoded every time** (`src/frameProcessor.ts`):
   `_makeRedFrameAsync` allocates, fills, and JPEG-encodes a deterministic buffer
   on every oversized tile — potentially every frame on busy pages.
   Fix: memoize by `${w}x${h}:${enc}`.

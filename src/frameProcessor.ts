@@ -1,7 +1,6 @@
 import os from "node:os";
 import sharp from "sharp";
 import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "./protocol.js";
-import { hash32 } from "./util.js";
 
 sharp.concurrency(Math.max(1, os.cpus().length - 1));
 
@@ -31,6 +30,7 @@ export class FrameProcessor {
   private _prev?: Uint32Array;
   private _iter = 0;
   private _fullFrameRequested = false;
+  private _redTileCache = new Map<string, Promise<Buffer>>();
 
   constructor(cfg: FrameProcessorCfg) {
     this._cfg = cfg;
@@ -62,8 +62,7 @@ export class FrameProcessor {
         const w = Math.min(this._cfg.tileSize, rgba.width - x);
         const h = Math.min(this._cfg.tileSize, rgba.height - y);
 
-        const raw = this._extractRaw(rgba, x, y, w, h);
-        const h32 = hash32(raw);
+        const h32 = this._hashTile(rgba, x, y, w, h);
         const idx = ty * this._cols + tx;
         const prev = this._prev![idx];
         const changed = forceFull || (prev !== h32);
@@ -85,13 +84,12 @@ export class FrameProcessor {
     }
 
     const maxBytesPerTile = this._cfg.maxBytesPerMessage - FRAME_HEADER_BYTES - TILE_HEADER_BYTES;
-    for (let i = 0; i < out.rects.length; i++) {
-      const r = out.rects[i];
+    await Promise.all(out.rects.map(async (r, i) => {
       if (r.data.length > maxBytesPerTile) {
         const redData = await this._makeRedFrameAsync(r.w, r.h, chosenEncoding);
         out.rects[i] = { x: r.x, y: r.y, w: r.w, h: r.h, data: redData };
       }
-    }
+    }));
 
     this._iter++;
     return out;
@@ -103,13 +101,12 @@ export class FrameProcessor {
     encoding: Encoding
   ): Promise<FrameOut> {
     const rectsForFull = this._splitWholeFrame(rgba.width, rgba.height, this._cfg.fullframeTileCount);
-    const rects: Rect[] = [];
-
-    for (const r of rectsForFull) {
+    // Extract sequentially (sync CPU), encode in parallel on sharp's pool.
+    const rects: Rect[] = await Promise.all(rectsForFull.map(async r => {
       const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
       const data = await this._encode(raw, r.w, r.h, encoding);
-      rects.push({ x: r.x, y: r.y, w: r.w, h: r.h, data });
-    }
+      return { x: r.x, y: r.y, w: r.w, h: r.h, data };
+    }));
 
     for (const t of tilesInfo) this._prev![t.idx] = t.h32;
 
@@ -123,12 +120,11 @@ export class FrameProcessor {
   ): Promise<FrameOut> {
     const mergedRects = this._mergeChangedTiles(tiles, rgba.width, rgba.height);
 
-    const out: Rect[] = [];
-    for (const r of mergedRects) {
+    const out: Rect[] = await Promise.all(mergedRects.map(async r => {
       const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
       const data = await this._encode(raw, r.w, r.h, encoding);
-      out.push({ ...r, data });
-    }
+      return { ...r, data };
+    }));
     for (const t of tiles) if (t.changed) this._prev![t.idx] = t.h32;
 
     return { rects: out, isFullFrame: false, encoding };
@@ -277,6 +273,22 @@ export class FrameProcessor {
     this._prev = new Uint32Array(this._cols * this._rows);
   }
 
+  // Strided FNV-1a over the first byte of every pixel in the tile — the same
+  // bytes hash32 sampled on an extracted tile copy, without the alloc+memcpy
+  // per tile per frame.
+  private _hashTile(rgba: RGBA, x: number, y: number, w: number, h: number): number {
+    const { data, width } = rgba;
+    let hsh = 0x811C9DC5 >>> 0;
+    for (let yy = 0; yy < h; yy++) {
+      let off = ((y + yy) * width + x) * 4;
+      for (let xx = 0; xx < w; xx++, off += 4) {
+        hsh ^= data[off];
+        hsh = (hsh * 0x01000193) >>> 0;
+      }
+    }
+    return hsh >>> 0;
+  }
+
   private _extractRaw(rgba: RGBA, x: number, y: number, w: number, h: number): Buffer {
     const out = Buffer.allocUnsafe(w * h * 4);
     for (let yy = 0; yy < h; yy++) {
@@ -317,7 +329,20 @@ export class FrameProcessor {
     return out;
   }
 
-  private async _makeRedFrameAsync(w: number, h: number, enc: Encoding): Promise<Buffer> {
+  // "Tile too big" is a property of the page content, so this can fire on
+  // every frame; the output is deterministic per (w, h, enc) — cache it.
+  private _makeRedFrameAsync(w: number, h: number, enc: Encoding): Promise<Buffer> {
+    const key = `${w}x${h}:${enc}`;
+    let cached = this._redTileCache.get(key);
+    if (!cached) {
+      cached = this._buildRedFrameAsync(w, h, enc);
+      this._redTileCache.set(key, cached);
+      cached.catch(() => this._redTileCache.delete(key));
+    }
+    return cached;
+  }
+
+  private async _buildRedFrameAsync(w: number, h: number, enc: Encoding): Promise<Buffer> {
     const raw = Buffer.allocUnsafe(w * h * 4);
     const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
     const RGBA_RED = 0xFF0000FF; // bytes: FF 00 00 FF
