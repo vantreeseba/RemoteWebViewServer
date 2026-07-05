@@ -1,7 +1,8 @@
 import http from 'http';
 import { WebSocketServer } from "ws"
 import env from "env-var";
-import { makeConfigFromParams, logDeviceConfig } from "./config.js";
+import { makeConfigFromParams, logDeviceConfig, readInjectScriptConfig } from "./config.js";
+import { getInjectScriptFromUrl } from "./scriptLoader.js";
 import { broadcaster, ensureDeviceAsync, cleanupIdleAsync } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
@@ -32,6 +33,10 @@ setInterval(() => {
 }, HEARTBEAT_INTERVAL_MS);
 
 await bootstrapAsync();
+
+// Warm the inject-script cache so the first device connect doesn't pay the fetch.
+const injectCfg = readInjectScriptConfig();
+if (injectCfg.url) void getInjectScriptFromUrl(injectCfg);
 
 wss.on("connection", async (ws, req) => {
   alive.set(ws, true);

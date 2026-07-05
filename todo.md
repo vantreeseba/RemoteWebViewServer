@@ -59,7 +59,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
 
 ## Lower priority
 
-- [ ] **10. Failed inject-script fetches never negatively cached**
+- [x] **10. Failed inject-script fetches never negatively cached**
   (`src/scriptLoader.ts`): an unreachable `INJECT_JS_URL` adds up to 5 s to every
   device (re)connect, serialized inside `ensureDeviceAsync`.
   Fix: negative-cache failures with a short TTL; warm the cache at startup.
@@ -67,7 +67,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   (`src/deviceManager.ts`): `deleteDeviceAsync` never calls
   `selfTestRunner.stop()`; up to three timers (5s/70s/125s) retain the runner and
   can push stale FrameStats packets into a new session reusing the same id.
-- [ ] **12. Device setup serializes independent CDP round trips**
+- [x] **12. Device setup serializes independent CDP round trips**
   (`src/deviceManager.ts`): `Page.enable`, metrics override, emulated media, and
   the script fetch are awaited sequentially; ~10–25 ms avoidable per (re)connect.
   Fix: kick off the script fetch early, `Promise.all` the independent commands.

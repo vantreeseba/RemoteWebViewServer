@@ -85,6 +85,9 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     }
   }
 
+  // Kick the (cached) script fetch off before the CDP round trips.
+  const keyboardScriptPromise = getInjectScriptFromUrl(readInjectScriptConfig());
+
   const { targetId } = await root.send<{ targetId: string }>('Target.createTarget', {
     url: 'about:blank',
     width: cfg.width,
@@ -97,21 +100,26 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   });
   const session = (root as any).session(sessionId);
 
-  await session.send('Page.enable');
-  await session.send('Emulation.setDeviceMetricsOverride', {
-    width: cfg.width,
-    height: cfg.height,
-    deviceScaleFactor: 1,
-    mobile: true
-  });
+  // Independent CDP commands; ordering on the wire is preserved, so waiting
+  // for each reply before sending the next only adds round-trip latency.
+  const setup: Promise<unknown>[] = [
+    session.send('Page.enable'),
+    session.send('Emulation.setDeviceMetricsOverride', {
+      width: cfg.width,
+      height: cfg.height,
+      deviceScaleFactor: 1,
+      mobile: true
+    }),
+  ];
   if (PREFERS_REDUCED_MOTION) {
-    await session.send('Emulation.setEmulatedMedia', {
+    setup.push(session.send('Emulation.setEmulatedMedia', {
       media: 'screen',
       features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
-    });
+    }));
   }
+  await Promise.all(setup);
 
-  const keyboardScript = await getInjectScriptFromUrl(readInjectScriptConfig());
+  const keyboardScript = await keyboardScriptPromise;
   if (keyboardScript) {
     await session.send('Page.addScriptToEvaluateOnNewDocument', { source: keyboardScript });
   }
