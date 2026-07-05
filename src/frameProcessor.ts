@@ -4,7 +4,8 @@ import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "./protocol.js";
 
 sharp.concurrency(Math.max(1, os.cpus().length - 1));
 
-export type RGBA = { data: Buffer; width: number; height: number };
+// Raw interleaved pixel data; channels is 3 (RGB) or 4 (RGBA).
+export type RawImage = { data: Buffer; width: number; height: number; channels: number };
 
 export type Rect = { x: number; y: number; w: number; h: number; data: Buffer };
 
@@ -41,7 +42,7 @@ export class FrameProcessor {
     this._fullFrameRequested = true;
   }
 
-  public async processFrameAsync(rgba: RGBA): Promise<FrameOut> {
+  public async processFrameAsync(rgba: RawImage): Promise<FrameOut> {
     if (!this._prev) this._initGrid(rgba.width, rgba.height);
 
     let forceFull = (this._iter % this._cfg.fullFrameEvery) === 0;
@@ -96,7 +97,7 @@ export class FrameProcessor {
   }
 
   private async _processFullFrame(
-    rgba: RGBA,
+    rgba: RawImage,
     tilesInfo: { idx: number; h32: number }[],
     encoding: Encoding
   ): Promise<FrameOut> {
@@ -104,7 +105,7 @@ export class FrameProcessor {
     // Extract sequentially (sync CPU), encode in parallel on sharp's pool.
     const rects: Rect[] = await Promise.all(rectsForFull.map(async r => {
       const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-      const data = await this._encode(raw, r.w, r.h, encoding);
+      const data = await this._encode(raw, r.w, r.h, rgba.channels, encoding);
       return { x: r.x, y: r.y, w: r.w, h: r.h, data };
     }));
 
@@ -114,7 +115,7 @@ export class FrameProcessor {
   }
 
   private async _processPartialFrame(
-    rgba: RGBA,
+    rgba: RawImage,
     tiles: { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean }[],
     encoding: Encoding
   ): Promise<FrameOut> {
@@ -122,7 +123,7 @@ export class FrameProcessor {
 
     const out: Rect[] = await Promise.all(mergedRects.map(async r => {
       const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-      const data = await this._encode(raw, r.w, r.h, encoding);
+      const data = await this._encode(raw, r.w, r.h, rgba.channels, encoding);
       return { ...r, data };
     }));
     for (const t of tiles) if (t.changed) this._prev![t.idx] = t.h32;
@@ -276,12 +277,12 @@ export class FrameProcessor {
   // Strided FNV-1a over the first byte of every pixel in the tile — the same
   // bytes hash32 sampled on an extracted tile copy, without the alloc+memcpy
   // per tile per frame.
-  private _hashTile(rgba: RGBA, x: number, y: number, w: number, h: number): number {
-    const { data, width } = rgba;
+  private _hashTile(rgba: RawImage, x: number, y: number, w: number, h: number): number {
+    const { data, width, channels } = rgba;
     let hsh = 0x811C9DC5 >>> 0;
     for (let yy = 0; yy < h; yy++) {
-      let off = ((y + yy) * width + x) * 4;
-      for (let xx = 0; xx < w; xx++, off += 4) {
+      let off = ((y + yy) * width + x) * channels;
+      for (let xx = 0; xx < w; xx++, off += channels) {
         hsh ^= data[off];
         hsh = (hsh * 0x01000193) >>> 0;
       }
@@ -289,39 +290,40 @@ export class FrameProcessor {
     return hsh >>> 0;
   }
 
-  private _extractRaw(rgba: RGBA, x: number, y: number, w: number, h: number): Buffer {
-    const out = Buffer.allocUnsafe(w * h * 4);
+  private _extractRaw(rgba: RawImage, x: number, y: number, w: number, h: number): Buffer {
+    const c = rgba.channels;
+    const out = Buffer.allocUnsafe(w * h * c);
     for (let yy = 0; yy < h; yy++) {
-      const src = ((y + yy) * rgba.width + x) * 4;
-      rgba.data.copy(out, yy * w * 4, src, src + w * 4);
+      const src = ((y + yy) * rgba.width + x) * c;
+      rgba.data.copy(out, yy * w * c, src, src + w * c);
     }
     return out;
   }
 
-  private async _encode(rawRgba: Buffer, w: number, h: number, enc: Encoding): Promise<Buffer> {
+  private async _encode(raw: Buffer, w: number, h: number, channels: number, enc: Encoding): Promise<Buffer> {
     switch (enc) {
       case Encoding.JPEG:
-        return this._encodeJPEG(rawRgba, w, h);
+        return this._encodeJPEG(raw, w, h, channels);
       case Encoding.RAW565:
-        return this._encodeRAW565(rawRgba);
+        return this._encodeRAW565(raw, channels);
       default:
-        return this._encodeJPEG(rawRgba, w, h);
+        return this._encodeJPEG(raw, w, h, channels);
     }
   }
 
-  private async _encodeJPEG(rawRgba: Buffer, w: number, h: number): Promise<Buffer> {
-    return sharp(rawRgba, { raw: { width: w, height: h, channels: 4 } })
+  private async _encodeJPEG(raw: Buffer, w: number, h: number, channels: number): Promise<Buffer> {
+    return sharp(raw, { raw: { width: w, height: h, channels: channels as 3 | 4 } })
       .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:2:0" })
       .toBuffer();
   }
 
-  private _encodeRAW565(rawRgba: Buffer): Buffer {
-    const pxCount = rawRgba.length >> 2;
+  private _encodeRAW565(raw: Buffer, channels: number): Buffer {
+    const pxCount = (raw.length / channels) | 0;
     const out = Buffer.allocUnsafe(pxCount * 2);
-    for (let i = 0, j = 0; i < pxCount; i++, j += 4) {
-      const r = rawRgba[j];
-      const g = rawRgba[j + 1];
-      const b = rawRgba[j + 2];
+    for (let i = 0, j = 0; i < pxCount; i++, j += channels) {
+      const r = raw[j];
+      const g = raw[j + 1];
+      const b = raw[j + 2];
       const v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
       out[i * 2] = v & 0xFF;
       out[i * 2 + 1] = (v >> 8) & 0xFF;
@@ -343,10 +345,12 @@ export class FrameProcessor {
   }
 
   private async _buildRedFrameAsync(w: number, h: number, enc: Encoding): Promise<Buffer> {
-    const raw = Buffer.allocUnsafe(w * h * 4);
-    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-    const RGBA_RED = 0xFF0000FF; // bytes: FF 00 00 FF
-    for (let o = 0; o < raw.length; o += 4) view.setUint32(o, RGBA_RED, true);
-    return this._encode(raw, w, h, enc);
+    const raw = Buffer.allocUnsafe(w * h * 3);
+    for (let o = 0; o < raw.length; o += 3) {
+      raw[o] = 0xFF;
+      raw[o + 1] = 0x00;
+      raw[o + 2] = 0x00;
+    }
+    return this._encode(raw, w, h, 3, enc);
   }
 }

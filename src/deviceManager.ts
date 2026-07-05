@@ -170,11 +170,16 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       let img = sharp(pngFull);
       if (dev.cfg.rotation) img = img.rotate(dev.cfg.rotation);
 
-      const { data, info } = await img
-        .ensureAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-      const out = await processor.processFrameAsync({ data, width: info.width, height: info.height });
+      // Screencast PNGs are opaque RGB(A); decoding without ensureAlpha
+      // avoids paying for a 4th channel in every downstream copy/hash/encode.
+      let { data, info } = await img.raw().toBuffer({ resolveWithObject: true });
+      if (info.channels < 3) {
+        // Grayscale PNGs shouldn't occur from the screencast; normalize.
+        let fb = sharp(pngFull).toColourspace('srgb').ensureAlpha();
+        if (dev.cfg.rotation) fb = fb.rotate(dev.cfg.rotation);
+        ({ data, info } = await fb.raw().toBuffer({ resolveWithObject: true }));
+      }
+      const out = await processor.processFrameAsync({ data, width: info.width, height: info.height, channels: info.channels });
       if (out.rects.length > 0) {
         dev.frameId = (dev.frameId + 1) >>> 0;
         broadcaster.sendFrameChunked(id, out, dev.frameId, cfg.maxBytesPerMessage);

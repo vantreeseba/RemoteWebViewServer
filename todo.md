@@ -45,7 +45,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   partial-frame, and red-replacement paths `await` each `_encode` in a loop,
   paying sum-of-encodes instead of max-of-encodes despite `sharp.concurrency`.
   Fix: `Promise.all` the rect encodes.
-- [ ] **7. `ensureAlpha()` inflates every frame by 33%**
+- [x] **7. `ensureAlpha()` inflates every frame by 33%**
   (`src/deviceManager.ts`, `src/frameProcessor.ts`): screencast PNGs are opaque;
   forcing RGBA grows every downstream copy/hash/encode.
   Fix: drop `ensureAlpha`, parameterize the processor on `info.channels`.
