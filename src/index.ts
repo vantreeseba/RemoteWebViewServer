@@ -45,11 +45,19 @@ wss.on("connection", async (ws, req) => {
   const url = new URL(req.url || "", `ws://localhost:${WS_PORT}`);
   const id = url.searchParams.get("id") || "default";
 
-  const cfg = makeConfigFromParams(url.searchParams);
-  logDeviceConfig(id, cfg);
+  let dev;
+  try {
+    const cfg = makeConfigFromParams(url.searchParams);
+    logDeviceConfig(id, cfg);
 
-  broadcaster.addClient(id, ws);
-  const dev = await ensureDeviceAsync(id, cfg);
+    broadcaster.addClient(id, ws);
+    dev = await ensureDeviceAsync(id, cfg);
+  } catch (e) {
+    // A rejection escaping this async listener would crash the process.
+    console.warn(`[server] Failed to set up device ${id}: ${(e as Error).message}`);
+    try { ws.close(); } catch { }
+    return;
+  }
 
   ws.on("message", (msg, isBinary) => {
     if (!isBinary) return;
