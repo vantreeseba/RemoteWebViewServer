@@ -20,7 +20,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   (processor state, possibly the last pending base64 PNG) on every
   reconfigure/idle-cleanup cycle.
   Fix: `releaseSession(sessionId)` on the root, called from `deleteDeviceAsync`.
-- [ ] **3. Screencast runs with zero clients / dead sockets**
+- [x] **3. Screencast runs with zero clients / dead sockets**
   (`src/deviceManager.ts`, `src/index.ts`): frames are ACK'd but Chromium keeps
   compositing + PNG-encoding for the full 5-min idle TTL after the last client
   leaves; a client that vanishes without FIN stays `readyState OPEN` (no

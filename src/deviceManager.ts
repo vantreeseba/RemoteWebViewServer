@@ -35,6 +35,35 @@ export const broadcaster = new DeviceBroadcaster();
 // Deltas are only valid in sequence; after the broadcaster drops frames for
 // a lagging client, resync it with a full frame.
 broadcaster.onFramesDropped = (id) => devices.get(id)?.processor.requestFullFrame();
+// Without a screencast consumer Chromium still composites and PNG-encodes
+// every frame; stop it while nobody is watching (restarted on reconnect).
+broadcaster.onClientCountZero = (id) => {
+  pauseScreencastAsync(id).catch(e =>
+    console.warn(`[device] Failed to pause screencast for ${id}: ${(e as Error).message}`));
+};
+
+const screencastParams = (cfg: DeviceConfig) => ({
+  format: 'png' as const,
+  maxWidth: cfg.width,
+  maxHeight: cfg.height,
+  everyNthFrame: cfg.everyNthFrame,
+});
+
+async function pauseScreencastAsync(id: string): Promise<void> {
+  const dev = devices.get(id);
+  if (!dev || broadcaster.getClientCount(id) > 0) return;
+
+  dev.lastActive = Date.now();
+  await dev.cdp.send('Page.stopScreencast');
+  console.log(`[device] Screencast paused for idle device ${id}`);
+
+  // A client may have connected while stopScreencast was in flight, and CDP
+  // applies commands in order — make sure the stream is running again.
+  if (broadcaster.getClientCount(id) > 0 && devices.get(id) === dev) {
+    await dev.cdp.send('Page.startScreencast', screencastParams(dev.cfg));
+    dev.processor.requestFullFrame();
+  }
+}
 
 export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
   const root = getRoot();
@@ -44,6 +73,9 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   if (device) {
     if (deviceConfigsEqual(device.cfg, cfg)) {
       device.lastActive = Date.now();
+      // Screencast may be paused from a zero-client period; (re)starting is
+      // idempotent and the client needs a full frame either way.
+      await device.cdp.send('Page.startScreencast', screencastParams(cfg));
       device.processor.requestFullFrame();
       return device;
     } else {
@@ -83,12 +115,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     await session.send('Page.addScriptToEvaluateOnNewDocument', { source: keyboardScript });
   }
 
-  await session.send('Page.startScreencast', {
-    format: 'png',
-    maxWidth: cfg.width,
-    maxHeight: cfg.height,
-    everyNthFrame: cfg.everyNthFrame
-  });
+  await session.send('Page.startScreencast', screencastParams(cfg));
 
   const processor = new FrameProcessor({
     tileSize: cfg.tileSize,

@@ -17,6 +17,10 @@ export class DeviceBroadcaster {
   // device should request a full frame so the client resyncs.
   public onFramesDropped?: (id: string) => void;
 
+  // Called when the last client of a device disconnects, so the device can
+  // stop paying for rendering nobody sees.
+  public onClientCountZero?: (id: string) => void;
+
   addClient(id: string, ws: WebSocket): void {
     const old = this._clients.get(id);
     if (old && old.size) {
@@ -40,10 +44,11 @@ export class DeviceBroadcaster {
   }
 
   removeClient(id: string, ws: WebSocket): void {
-    this._clients.get(id)?.delete(ws);
+    const had = this._clients.get(id)?.delete(ws) ?? false;
     if ((this._clients.get(id)?.size ?? 0) === 0) {
       this._clients.delete(id);
       this._state.delete(id);
+      if (had) this.onClientCountZero?.(id);
     }
     console.log(`[broadcaster] Client disconnected from device ${id}, total clients: ${this._clients.get(id)?.size ?? 0}`);
   }
