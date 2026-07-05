@@ -152,26 +152,31 @@ export function buildFrameStatsPacket(): Buffer {
 }
 
 export function buildFramePacket(rects: Rect[], enc: Encoding, frameId: number, flags = 0): Buffer {
-  const count = rects.length;
-  const header = Buffer.alloc(FRAME_HEADER_BYTES);
-  header.writeUInt8(MsgType.Frame, 0);
-  header.writeUInt8(PROTOCOL_VERSION, 1);
-  header.writeUInt32LE(frameId >>> 0, 2);
-  header.writeUInt8(enc, 6);
-  header.writeUInt16LE(count, 7);
-  header.writeUInt16LE(flags, 9);
+  let size = FRAME_HEADER_BYTES;
+  for (const r of rects) size += TILE_HEADER_BYTES + r.data.length;
 
-  const parts: Buffer[] = [header];
+  // Single exact-size allocation; headers and tile data are written in place
+  // to avoid the extra full copy of the payload that Buffer.concat costs.
+  const buf = Buffer.allocUnsafe(size);
+  buf.writeUInt8(MsgType.Frame, 0);
+  buf.writeUInt8(PROTOCOL_VERSION, 1);
+  buf.writeUInt32LE(frameId >>> 0, 2);
+  buf.writeUInt8(enc, 6);
+  buf.writeUInt16LE(rects.length, 7);
+  buf.writeUInt16LE(flags, 9);
+
+  let off = FRAME_HEADER_BYTES;
   for (const r of rects) {
-    const rh = Buffer.alloc(TILE_HEADER_BYTES);
-    rh.writeUInt16LE(r.x, 0);
-    rh.writeUInt16LE(r.y, 2);
-    rh.writeUInt16LE(r.w, 4);
-    rh.writeUInt16LE(r.h, 6);
-    rh.writeUInt32LE(r.data.length >>> 0, 8);
-    parts.push(rh, r.data);
+    buf.writeUInt16LE(r.x, off + 0);
+    buf.writeUInt16LE(r.y, off + 2);
+    buf.writeUInt16LE(r.w, off + 4);
+    buf.writeUInt16LE(r.h, off + 6);
+    buf.writeUInt32LE(r.data.length >>> 0, off + 8);
+    off += TILE_HEADER_BYTES;
+    r.data.copy(buf, off);
+    off += r.data.length;
   }
-  return Buffer.concat(parts);
+  return buf;
 }
 
 export function buildFramePackets(rects: Rect[], enc: Encoding, frameId: number, isFullFrame: boolean, maxBytes: number): Buffer[] {

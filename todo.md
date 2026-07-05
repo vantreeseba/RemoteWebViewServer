@@ -53,7 +53,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   `_makeRedFrameAsync` allocates, fills, and JPEG-encodes a deterministic buffer
   on every oversized tile — potentially every frame on busy pages.
   Fix: memoize by `${w}x${h}:${enc}`.
-- [ ] **9. `buildFramePacket` extra copy** (`src/protocol.ts`): header-per-tile
+- [x] **9. `buildFramePacket` extra copy** (`src/protocol.ts`): header-per-tile
   allocs + `Buffer.concat` cost a full redundant memcpy of the payload per packet.
   Fix: compute exact size, `allocUnsafe` once, write in place.
 
