@@ -27,7 +27,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   ping/pong liveness), keeping the whole pipeline encoding for a dead peer.
   Fix: `Page.stopScreencast` when client count hits zero, restart on reconnect;
   server-initiated ping/pong that terminates unresponsive sockets.
-- [ ] **4. Throttle race → concurrent frame processing**
+- [x] **4. Throttle race → concurrent frame processing**
   (`src/deviceManager.ts`): `flushPending` clears `throttleTimer` on entry but
   updates `lastProcessedMs` only in `finally`, so a frame arriving mid-processing
   schedules a second concurrent `flushPending` exactly when processing time

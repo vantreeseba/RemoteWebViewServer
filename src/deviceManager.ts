@@ -25,6 +25,7 @@ export type DeviceSession = {
   pendingB64?: string;
   throttleTimer?: NodeJS.Timeout;
   lastProcessedMs?: number;
+  processing: boolean;
 };
 
 const PREFERS_REDUCED_MOTION = /^(1|true|yes|on)$/i.test(process.env.PREFERS_REDUCED_MOTION ?? '');
@@ -141,6 +142,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     pendingB64: undefined,
     throttleTimer: undefined,
     lastProcessedMs: undefined,
+    processing: false,
   };
   devices.set(id, newDevice);
   newDevice.processor.requestFullFrame();
@@ -148,11 +150,13 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   const flushPending = async () => {
     const dev = newDevice;
     dev.throttleTimer = undefined;
+    if (dev.processing) return;
 
     const b64 = dev.pendingB64;
     dev.pendingB64 = undefined;
     if (!b64) return;
 
+    dev.processing = true;
     try {
       const pngFull = Buffer.from(b64, 'base64');
 
@@ -178,7 +182,13 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     } catch (e) {
       console.warn(`[device] Failed to process frame for ${id}: ${(e as Error).message}`);
     } finally {
+      dev.processing = false;
       dev.lastProcessedMs = Date.now();
+      // A frame that arrived mid-processing found the timer unset and
+      // processing true; schedule it now so it isn't stranded.
+      if (dev.pendingB64 && !dev.throttleTimer) {
+        dev.throttleTimer = setTimeout(flushPending, cfg.minFrameInterval);
+      }
     }
   };
 
@@ -193,7 +203,9 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
 
     const now = Date.now();
     const since = newDevice.lastProcessedMs ? (now - newDevice.lastProcessedMs) : Infinity;
-    if (!newDevice.throttleTimer) {
+    // `processing` guards against scheduling a second, concurrent flush while
+    // an earlier one is still mid-pipeline (flushPending re-arms on exit).
+    if (!newDevice.throttleTimer && !newDevice.processing) {
       const delay = Math.max(0, cfg.minFrameInterval - (Number.isFinite(since) ? since : 0));
       newDevice.throttleTimer = setTimeout(flushPending, delay);
     }
