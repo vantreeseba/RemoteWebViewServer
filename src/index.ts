@@ -80,9 +80,10 @@ wss.on("connection", async (ws, req) => {
     }
   })
 
+  // The broadcaster's own once("close"/"error") handlers remove the client;
+  // calling removeClient here too double-logged every disconnect.
   ws.on("close", () => {
     dev.lastActive = Date.now();
-    broadcaster.removeClient(id, ws);
   })
 });
 

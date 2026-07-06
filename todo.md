@@ -34,10 +34,10 @@ Findings from the 2026-07-05 performance review, ranked by impact.
 - [x] **20. Per-frame TileInfo object churn** (`src/frameProcessor.ts`): 375
   short-lived objects per frame for grid-constant data; use preallocated
   hash/changed typed arrays.
-- [ ] **21. Control packets queue behind frame drains** (`src/broadcaster.ts`):
+- [x] **21. Control packets queue behind frame drains** (`src/broadcaster.ts`):
   CurrentURL/self-test packets wait behind multi-second frame drains on slow
   clients; unshift them to the queue head.
-- [ ] **22. Every disconnect logs twice** (`src/index.ts`): both the
+- [x] **22. Every disconnect logs twice** (`src/index.ts`): both the
   broadcaster's own close handler and index.ts call `removeClient`.
 - [ ] **23. Reconfigure recreates the tab and reloads the page**
   (`src/deviceManager.ts`): a param change tears down the target and reloads

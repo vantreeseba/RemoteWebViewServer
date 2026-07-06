@@ -96,23 +96,22 @@ export class DeviceBroadcaster {
   }
 
   public startSelfTestMeasurement(id: string): void {
-    const peers = this._clients.get(id);
-    if (!peers || peers.size === 0) return;
-
-    const packet = buildFrameStatsPacket();
-    const st = this._ensureState(id);
-    st.queue.push({ packets: [packet] });
-    this._drainAsync(id).catch(() => {});
+    this._enqueueControlPacket(id, buildFrameStatsPacket());
   }
 
   public sendCurrentURL(id: string, url: string): void {
+    this._enqueueControlPacket(id, buildCurrentURLPacket(url));
+  }
+
+  // Control packets are tiny and carry no frame-sequencing dependency; jump
+  // the queue so they aren't stuck behind a multi-second frame drain on a
+  // slow client.
+  private _enqueueControlPacket(id: string, packet: Buffer): void {
     const peers = this._clients.get(id);
     if (!peers || peers.size === 0) return;
 
-    const packet = buildCurrentURLPacket(url);
     const st = this._ensureState(id);
-
-    st.queue.push({ packets: [packet] });
+    st.queue.unshift({ packets: [packet] });
     this._drainAsync(id).catch(() => {});
   }
 
