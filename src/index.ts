@@ -3,7 +3,7 @@ import { WebSocketServer } from "ws"
 import env from "env-var";
 import { makeConfigFromParams, logDeviceConfig, readInjectScriptConfig } from "./config.js";
 import { getInjectScriptFromUrl } from "./scriptLoader.js";
-import { broadcaster, ensureDeviceAsync, cleanupIdleAsync } from './deviceManager.js';
+import { broadcaster, ensureDeviceAsync, cleanupIdleAsync, DeviceSession } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
 import { isCdpHealthy } from './cdpRoot.js';
@@ -46,7 +46,46 @@ wss.on("connection", async (ws, req) => {
   const url = new URL(req.url || "", `ws://localhost:${WS_PORT}`);
   const id = url.searchParams.get("id") || "default";
 
-  let dev;
+  let dev: DeviceSession | undefined;
+
+  const dispatch = (d: DeviceSession, buf: Buffer) => {
+    switch (buf.readUInt8(0)) {
+      case MsgType.Touch:
+        inputRouter.handleTouchPacketAsync(d, buf).catch(e => console.warn(`Failed to handle touch packet: ${(e as Error).message}`));
+        break;
+      case MsgType.Keepalive:
+        // lastActive already bumped for every message.
+        break;
+      case MsgType.FrameStats:
+        inputRouter.handleFrameStatsPacketAsync(d, buf).catch(() => console.warn(`Failed to handle Self test packet`));
+        break;
+      case MsgType.OpenURL:
+        inputRouter.handleOpenURLPacketAsync(d, buf).catch(e => console.warn(`Failed to handle OpenURL packet: ${(e as Error).message}`));
+        break;
+    }
+  };
+
+  // Attach the message handler BEFORE awaiting device setup: clients send
+  // OpenURL immediately after connecting, and a handler attached after the
+  // ~100-500ms setup silently dropped those packets — the display then sat
+  // on about:blank until the client resent or reconnected. Buffer early
+  // packets and replay them once the device exists.
+  const early: Buffer[] = [];
+  ws.on("message", (msg, isBinary) => {
+    if (!isBinary) return;
+
+    const buf: Buffer = Buffer.isBuffer(msg) ? msg : Buffer.from(msg as ArrayBuffer);
+    if (!dev) {
+      if (early.length < 64) early.push(buf);
+      return;
+    }
+    // Liveness for the idle TTL: with the screencast paused on static pages,
+    // frames no longer bump lastActive, so count every sign of a live client.
+    dev.lastActive = Date.now();
+    dispatch(dev, buf);
+  });
+  ws.on("pong", () => { if (dev) dev.lastActive = Date.now(); });
+
   try {
     const cfg = makeConfigFromParams(url.searchParams);
     logDeviceConfig(id, cfg);
@@ -60,37 +99,13 @@ wss.on("connection", async (ws, req) => {
     return;
   }
 
-  // Liveness for the idle TTL: with the screencast paused on static pages,
-  // frames no longer bump lastActive, so count every sign of a live client —
-  // any message and WS pongs — or a connected-but-quiet display gets its
-  // device torn down at the 5-minute TTL and freezes.
-  ws.on("pong", () => { dev.lastActive = Date.now(); });
-
-  ws.on("message", (msg, isBinary) => {
-    if (!isBinary) return;
-    dev.lastActive = Date.now();
-
-    const buf: Buffer = Buffer.isBuffer(msg) ? msg : Buffer.from(msg as ArrayBuffer);
-    switch (buf.readUInt8(0)) {
-      case MsgType.Touch:
-        inputRouter.handleTouchPacketAsync(dev, buf).catch(e => console.warn(`Failed to handle touch packet: ${(e as Error).message}`));
-        break;
-      case MsgType.Keepalive:
-        // lastActive already bumped above for every message.
-        break;
-      case MsgType.FrameStats:
-        inputRouter.handleFrameStatsPacketAsync(dev, buf).catch(() => console.warn(`Failed to handle Self test packet`));
-        break;
-      case MsgType.OpenURL:
-        inputRouter.handleOpenURLPacketAsync(dev, buf).catch(e => console.warn(`Failed to handle OpenURL packet: ${(e as Error).message}`));
-        break;
-    }
-  })
+  dev.lastActive = Date.now();
+  for (const buf of early.splice(0)) dispatch(dev, buf);
 
   // The broadcaster's own once("close"/"error") handlers remove the client;
   // calling removeClient here too double-logged every disconnect.
   ws.on("close", () => {
-    dev.lastActive = Date.now();
+    if (dev) dev.lastActive = Date.now();
   })
 });
 
