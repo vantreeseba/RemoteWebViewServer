@@ -11,7 +11,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   full-frame encodes and PNG dedup stays disabled. Fix: gate `flushPending` on
   broadcaster queue depth; on overflow keep an incoming full frame (it replaces
   the stale queue) instead of dropping it and re-requesting.
-- [ ] **15. Server becomes a silent zombie if Chromium dies**
+- [x] **15. Server becomes a silent zombie if Chromium dies**
   (`src/cdpRoot.ts`): the root CDP connection never signals closure — sends
   after close never settle, every connect hangs forever and leaks a pending
   entry, and the health endpoint still says ok so watchdogs never restart.

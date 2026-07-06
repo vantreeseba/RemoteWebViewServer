@@ -6,6 +6,7 @@ import { getInjectScriptFromUrl } from "./scriptLoader.js";
 import { broadcaster, ensureDeviceAsync, cleanupIdleAsync } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
+import { isCdpHealthy } from './cdpRoot.js';
 import { MsgType } from './protocol.js';
 
 const WS_PORT = env.get("WS_PORT").default("8081").asIntPositive();
@@ -87,7 +88,13 @@ wss.on("connection", async (ws, req) => {
 
 http.createServer(async (req, res) => {
   try {
-    res.writeHead(200); res.end('ok');
+    if (isCdpHealthy()) {
+      res.writeHead(200); res.end('ok');
+    } else {
+      // Browser connection is gone; report unhealthy so the watchdog
+      // (HA add-on / docker healthcheck) restarts us.
+      res.writeHead(503); res.end('cdp down');
+    }
   } catch (e) {
     res.writeHead(500); res.end('err');
   }
