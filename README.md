@@ -26,7 +26,7 @@ Headless browser that renders target web pages (e.g., Home Assistant dashboards)
 
 The server does not include a built-in on-screen keyboard, but you can inject any external JavaScript file into every page it renders — including a virtual keyboard of your choice.
 
-- `INJECT_JS_URL` (empty by default): direct HTTPS URL to a JavaScript file. If set, the script is fetched once on startup and injected into every new page via `Page.addScriptToEvaluateOnNewDocument`.
+- `INJECT_JS_URL` (empty by default): direct HTTPS URL to a JavaScript file. If set, the script is fetched once and cached (at startup, retried on device connect if the fetch failed) and injected into every new page via `Page.addScriptToEvaluateOnNewDocument`.
 - `INJECT_JS_ALLOW_HTTP` (`false` by default): allow plain HTTP URLs (HTTPS is strongly recommended).
 
 > [!CAUTION]
