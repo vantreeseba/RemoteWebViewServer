@@ -27,6 +27,8 @@ export type DeviceSession = {
   throttleTimer?: NodeJS.Timeout;
   lastProcessedMs?: number;
   processing: boolean;
+  // screencast frame ids held back for paced acking (see ackPendingFrames)
+  pendingAcks: number[];
 };
 
 const PREFERS_REDUCED_MOTION = /^(1|true|yes|on)$/i.test(process.env.PREFERS_REDUCED_MOTION ?? '');
@@ -40,6 +42,20 @@ broadcaster.onFramesDropped = (id) => {
   const dev = devices.get(id);
   if (dev) requestDeviceFullFrame(dev);
 };
+
+// Paced acking: CDP screencast flow control only sends further frames while
+// earlier ones are acked. Holding the ack until we actually consume a frame
+// pushes the minFrameInterval throttle upstream into Chromium — it stops
+// encoding and shipping frames we would discard (at 60fps damage vs a 5fps
+// device, that's >90% of capture encodes and CDP traffic saved).
+function ackPendingFrames(dev: DeviceSession): void {
+  if (dev.pendingAcks.length === 0) return;
+  const acks = dev.pendingAcks;
+  dev.pendingAcks = [];
+  for (const sid of acks) {
+    dev.cdp.send('Page.screencastFrameAck', { sessionId: sid }).catch(() => { });
+  }
+}
 
 // A full-frame request must also clear the device-level PNG dedup hash:
 // on a static page the next screencast frame is byte-identical to the last
@@ -70,6 +86,7 @@ async function pauseScreencastAsync(id: string): Promise<void> {
   if (!dev || broadcaster.getClientCount(id) > 0) return;
 
   dev.lastActive = Date.now();
+  ackPendingFrames(dev);
   await dev.cdp.send('Page.stopScreencast');
   console.log(`[device] Screencast paused for idle device ${id}`);
 
@@ -101,6 +118,7 @@ async function reconfigureDeviceAsync(dev: DeviceSession, cfg: DeviceConfig): Pr
     dev.throttleTimer = undefined;
   }
   dev.pendingB64 = undefined; // any pending frame has the old geometry
+  ackPendingFrames(dev);
 
   await dev.cdp.send('Page.stopScreencast');
   await dev.cdp.send('Emulation.setDeviceMetricsOverride', {
@@ -235,6 +253,7 @@ async function createOrUpdateDeviceAsync(id: string, cfg: DeviceConfig): Promise
     throttleTimer: undefined,
     lastProcessedMs: undefined,
     processing: false,
+    pendingAcks: [],
   };
   devices.set(id, newDevice);
   requestDeviceFullFrame(newDevice);
@@ -254,6 +273,9 @@ async function createOrUpdateDeviceAsync(id: string, cfg: DeviceConfig): Promise
 
     const b64 = dev.pendingB64;
     dev.pendingB64 = undefined;
+    // Release held acks now that we're consuming a frame — Chromium prepares
+    // the next one while we process this one.
+    ackPendingFrames(dev);
 
     dev.processing = true;
     // Stamp at flush START so minFrameInterval is a start-to-start period;
@@ -313,11 +335,15 @@ async function createOrUpdateDeviceAsync(id: string, cfg: DeviceConfig): Promise
   };
 
   session.on('Page.screencastFrame', async (evt: any) => {
-    // ACK immediately to keep producer running
-    session.send('Page.screencastFrameAck', { sessionId: evt.sessionId }).catch(() => { });
-
-    if (broadcaster.getClientCount(newDevice.deviceId) === 0)
+    if (broadcaster.getClientCount(newDevice.deviceId) === 0) {
+      // No viewers: ack immediately so the stream isn't wedged while the
+      // zero-client pause is still in flight.
+      session.send('Page.screencastFrameAck', { sessionId: evt.sessionId }).catch(() => { });
       return;
+    }
+    // Hold the ack until this frame is consumed (paced acking, see
+    // ackPendingFrames) — Chromium won't encode/ship frames we'd discard.
+    newDevice.pendingAcks.push(evt.sessionId);
     newDevice.lastActive = Date.now();
     newDevice.pendingB64 = evt.data;
 
@@ -383,6 +409,7 @@ async function deleteDeviceAsync(device: DeviceSession) {
   if (device.throttleTimer)
     clearTimeout(device.throttleTimer);
   device.selfTestRunner.stop();
+  ackPendingFrames(device);
 
   try { await device.cdp.send("Page.stopScreencast").catch(() => { }); } catch { }
   try { await root?.send("Target.closeTarget", { targetId: device.id }); } catch { }

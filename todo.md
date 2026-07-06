@@ -33,6 +33,23 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   blind unshift reversed the order of e.g. a redirect chain's CurrentURLs;
   now inserted FIFO after control packets already at the head.
 
+## Pass 4 (2026-07-05, "CPU while idle" investigation)
+
+- [x] **32. Client messages sent right after connect were silently dropped**
+  (`src/index.ts`): the ws message handler attached only after the awaited
+  device setup (~100–500 ms), so an OpenURL sent immediately on connect was
+  lost — the display sat on about:blank until the client resent or
+  reconnected. Handlers now attach first and early packets are buffered and
+  replayed. (Found because it invalidated every CPU measurement.)
+- [x] **33. Immediate screencast acks made Chromium encode+ship every damaged
+  frame** (`src/deviceManager.ts`): at 60 fps damage vs a 5 fps device, ~90%
+  of capture encodes and CDP traffic were discarded work. Acks are now held
+  until a frame is consumed (CDP flow control), pushing the minFrameInterval
+  throttle upstream: measured 60 → ~15 frames/s delivered (Chromium's ~3-frame
+  in-flight window), client fps unchanged, server pipeline CPU −27%. Idle
+  pages already cost zero server CPU (verified); remaining idle CPU is
+  Chromium compositing the page itself.
+
 ## Pass 2 (2026-07-05, post-fix review)
 
 - [x] **14. Slow clients trigger a full-frame encode livelock**
