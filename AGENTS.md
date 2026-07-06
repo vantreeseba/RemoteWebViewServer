@@ -59,7 +59,8 @@ RemoteWebViewServer/
   processor — the page is not reloaded) when the client reconnects with new
   params. Idle sessions are cleaned up after 5 minutes by a 60s interval timer;
   the screencast is paused while a device has no clients.
-- **Frame pipeline**: `Page.screencastFrame` (PNG, base64) → ACK immediately →
+- **Frame pipeline**: `Page.screencastFrame` (JPEG by default, PNG via
+  `SCREENCAST_FORMAT`; base64) → ACK immediately →
   skip all work if the device has no connected clients → trailing throttle by
   `minFrameInterval` → `hash32` dedup of identical frames → sharp rotate +
   raw RGBA → `FrameProcessor` tile diff → JPEG tiles → `broadcaster`

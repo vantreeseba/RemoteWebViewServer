@@ -20,6 +20,11 @@ export type InjectScriptConfig = {
   allowHttp: boolean;
 };
 
+export type ScreencastConfig = {
+  format: 'jpeg' | 'png';
+  quality: number; // jpeg only, 1..100
+};
+
 const DEFAULTS = {
   tileSize: 32,
   fullFrameTileCount: 4,
@@ -166,6 +171,21 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
   const body = entries.map(([k, v]) => `  ${k}=${v}`).join('\n');
 
   console.info(`${head}\n${body}`);
+}
+
+// JPEG is the default: for dashboard content it is typically 4-10x smaller
+// than PNG, cutting Chromium's per-frame encode, the base64/JSON overhead on
+// the CDP socket, and the server-side decode. Chromium's encoder is
+// deterministic, so the whole-frame dedup still works, and JPEG artifacts
+// are block-local, so unchanged tiles don't churn. Set SCREENCAST_FORMAT=png
+// for lossless capture (avoids double compression on changed tiles).
+export function readScreencastConfig(): ScreencastConfig {
+  const rawFormat = (env.get("SCREENCAST_FORMAT").default("jpeg").asString() ?? "jpeg").trim().toLowerCase();
+  if (rawFormat !== "jpeg" && rawFormat !== "png") {
+    throw new Error(`invalid SCREENCAST_FORMAT: "${rawFormat}" (expected "jpeg" or "png")`);
+  }
+  const quality = clamp(env.get("SCREENCAST_QUALITY").default("90").asIntPositive(), 1, 100);
+  return { format: rawFormat, quality };
 }
 
 export function readInjectScriptConfig(): InjectScriptConfig {

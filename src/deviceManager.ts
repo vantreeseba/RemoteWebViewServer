@@ -1,6 +1,6 @@
 import { CDPSession } from "playwright-core";
 import sharp from "sharp";
-import { DeviceConfig, deviceConfigsEqual, readInjectScriptConfig } from "./config.js";
+import { DeviceConfig, deviceConfigsEqual, readInjectScriptConfig, readScreencastConfig } from "./config.js";
 import { getRoot } from "./cdpRoot.js";
 import { FrameProcessor } from "./frameProcessor.js";
 import { DeviceBroadcaster } from "./broadcaster.js";
@@ -55,8 +55,11 @@ broadcaster.onClientCountZero = (id) => {
     console.warn(`[device] Failed to pause screencast for ${id}: ${(e as Error).message}`));
 };
 
+const SCREENCAST = readScreencastConfig();
+
 const screencastParams = (cfg: DeviceConfig) => ({
-  format: 'png' as const,
+  format: SCREENCAST.format,
+  ...(SCREENCAST.format === 'jpeg' ? { quality: SCREENCAST.quality } : {}),
   maxWidth: cfg.width,
   maxHeight: cfg.height,
   everyNthFrame: cfg.everyNthFrame,
@@ -270,11 +273,11 @@ async function createOrUpdateDeviceAsync(id: string, cfg: DeviceConfig): Promise
       let img = sharp(pngFull);
       if (dev.cfg.rotation) img = img.rotate(dev.cfg.rotation);
 
-      // Screencast PNGs are opaque RGB(A); decoding without ensureAlpha
+      // Screencast frames are opaque RGB(A); decoding without ensureAlpha
       // avoids paying for a 4th channel in every downstream copy/hash/encode.
       let { data, info } = await img.raw().toBuffer({ resolveWithObject: true });
       if (info.channels < 3) {
-        // Grayscale PNGs shouldn't occur from the screencast; normalize.
+        // Grayscale frames shouldn't occur from the screencast; normalize.
         let fb = sharp(pngFull).toColourspace('srgb').ensureAlpha();
         if (dev.cfg.rotation) fb = fb.rotate(dev.cfg.rotation);
         ({ data, info } = await fb.raw().toBuffer({ resolveWithObject: true }));

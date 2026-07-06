@@ -65,6 +65,8 @@ services:
       EVERY_NTH_FRAME: 1
       MIN_FRAME_INTERVAL_MS: 80
       JPEG_QUALITY: 85
+      SCREENCAST_FORMAT: jpeg # capture format from Chromium: jpeg (default, cheaper) or png (lossless)
+      SCREENCAST_QUALITY: 90  # jpeg capture quality (ignored for png)
       MAX_BYTES_PER_MESSAGE: 14336
       WS_PORT: 8081
       DEBUG_PORT: 9221 # internal debug port
