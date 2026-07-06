@@ -57,6 +57,16 @@ export class DeviceBroadcaster {
     return this._clients.get(id)?.size ?? 0;
   }
 
+  // Devices check this before paying for decode/diff/encode: a frame produced
+  // while the queue is at cap would be dropped anyway.
+  public isQueueFull(id: string): boolean {
+    const st = this._state.get(id);
+    if (!st) return false;
+    let frames = 0;
+    for (const f of st.queue) if (f.frameId != null) frames++;
+    return frames >= MAX_QUEUED_FRAMES;
+  }
+
   public sendFrameChunked(id: string, data: FrameOut, frameId: number, maxBytes = 12_000): void {
     const peers = this._clients.get(id);
     if (!peers || peers.size === 0 || data.rects.length === 0) return;
@@ -66,14 +76,18 @@ export class DeviceBroadcaster {
 
     const queuedFrames = st.queue.filter(f => f.frameId != null).length;
     if (queuedFrames >= MAX_QUEUED_FRAMES) {
-      // Client can't keep up: drop queued frames (keeping control packets)
-      // and this one too — deltas are only valid in sequence, so ask the
-      // device for a full frame to resync instead.
+      // Client can't keep up: stale queued frames are worthless for a
+      // display, so drop them (keeping control packets).
       const control = st.queue.filter(f => f.frameId == null);
       st.queue.length = 0;
       st.queue.push(...control);
-      this.onFramesDropped?.(id);
-      return;
+      if (!data.isFullFrame) {
+        // This delta's base may just have been dropped; drop it too and ask
+        // the device for a full frame to resync.
+        this.onFramesDropped?.(id);
+        return;
+      }
+      // A full frame is complete fresh state — it replaces the dropped queue.
     }
 
     const packets = buildFramePackets(data.rects, data.encoding, frameId, data.isFullFrame, maxBytes);

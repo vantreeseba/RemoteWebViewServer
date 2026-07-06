@@ -4,7 +4,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
 
 ## Pass 2 (2026-07-05, post-fix review)
 
-- [ ] **14. Slow clients trigger a full-frame encode livelock**
+- [x] **14. Slow clients trigger a full-frame encode livelock**
   (`src/deviceManager.ts`, `src/broadcaster.ts`): when a client's queue is at
   cap, frames are still fully decoded/hashed/encoded upstream and then dropped;
   every drop re-requests a full frame, so all the wasted encodes are worst-case

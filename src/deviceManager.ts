@@ -170,10 +170,17 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     const dev = newDevice;
     dev.throttleTimer = undefined;
     if (dev.processing) return;
+    if (!dev.pendingB64) return;
+
+    // The broadcaster would drop the result anyway — don't pay for the
+    // decode/diff/encode. Keep the pending frame and check again later.
+    if (broadcaster.isQueueFull(dev.deviceId)) {
+      dev.throttleTimer = setTimeout(flushPending, dev.cfg.minFrameInterval);
+      return;
+    }
 
     const b64 = dev.pendingB64;
     dev.pendingB64 = undefined;
-    if (!b64) return;
 
     dev.processing = true;
     try {
