@@ -24,14 +24,14 @@ Findings from the 2026-07-05 performance review, ranked by impact.
 - [x] **17. Effective frame period is processing + minFrameInterval**
   (`src/deviceManager.ts`): `lastProcessedMs` is stamped at processing end, so
   fps sags below the configured rate exactly under load. Stamp at flush start.
-- [ ] **18. `_extractRaw` copies every encoded rect** (`src/frameProcessor.ts`):
+- [x] **18. `_extractRaw` copies every encoded rect** (`src/frameProcessor.ts`):
   sharp `.extract()` crops the shared raw buffer natively; the JS-side
   alloc+memcpy per rect (whole frame per full frame) is avoidable.
-- [ ] **19. Grid geometry recomputed per partial frame**
+- [x] **19. Grid geometry recomputed per partial frame**
   (`src/frameProcessor.ts`): `_mergeChangedTiles` rebuilds boolean grids,
   splits, and max-tile sizes (~40 allocations) per frame from immutable config.
   Compute once in `_initGrid`, reuse flat typed arrays.
-- [ ] **20. Per-frame TileInfo object churn** (`src/frameProcessor.ts`): 375
+- [x] **20. Per-frame TileInfo object churn** (`src/frameProcessor.ts`): 375
   short-lived objects per frame for grid-constant data; use preallocated
   hash/changed typed arrays.
 - [ ] **21. Control packets queue behind frame drains** (`src/broadcaster.ts`):

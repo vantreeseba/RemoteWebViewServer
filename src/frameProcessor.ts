@@ -28,10 +28,23 @@ export class FrameProcessor {
   private _cfg: FrameProcessorCfg;
   private _cols = 0;
   private _rows = 0;
-  private _prev?: Uint32Array;
   private _iter = 0;
   private _fullFrameRequested = false;
   private _redTileCache = new Map<string, Promise<Buffer>>();
+
+  // Grid state, all sized/computed once in _initGrid — frame dimensions are
+  // pinned by the screencast config, so per-frame recomputation is waste.
+  private _prev?: Uint32Array;       // last acknowledged tile hashes
+  private _curHashes?: Uint32Array;  // scratch: this frame's tile hashes
+  private _changed?: Uint8Array;     // scratch: this frame's changed flags
+  private _visited?: Uint8Array;     // scratch for _mergeChangedTiles
+  private _widths: number[] = [];    // per-column tile widths (last clipped)
+  private _heights: number[] = [];   // per-row tile heights (last clipped)
+  private _xOffsets: number[] = [];
+  private _yOffsets: number[] = [];
+  private _fullRects: { x: number; y: number; w: number; h: number }[] = [];
+  private _maxW = 0;                 // largest full-frame rect dims — caps
+  private _maxH = 0;                 // merged partial rects to the same size
 
   constructor(cfg: FrameProcessorCfg) {
     this._cfg = cfg;
@@ -52,24 +65,22 @@ export class FrameProcessor {
     }
     const chosenEncoding: Encoding = Encoding.JPEG;
 
-    type TileInfo = { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean };
-    const tiles: TileInfo[] = [];
+    const cur = this._curHashes!;
+    const changed = this._changed!;
+    const prev = this._prev!;
     let changedArea = 0;
 
     for (let ty = 0; ty < this._rows; ty++) {
       for (let tx = 0; tx < this._cols; tx++) {
-        const x = tx * this._cfg.tileSize;
-        const y = ty * this._cfg.tileSize;
-        const w = Math.min(this._cfg.tileSize, rgba.width - x);
-        const h = Math.min(this._cfg.tileSize, rgba.height - y);
-
-        const h32 = this._hashTile(rgba, x, y, w, h);
         const idx = ty * this._cols + tx;
-        const prev = this._prev![idx];
-        const changed = forceFull || (prev !== h32);
+        const w = this._widths[tx];
+        const h = this._heights[ty];
 
-        tiles.push({ x, y, w, h, idx, h32, changed });
-        if (changed) changedArea += w * h;
+        const h32 = this._hashTile(rgba, this._xOffsets[tx], this._yOffsets[ty], w, h);
+        cur[idx] = h32;
+        const isChanged = forceFull || (prev[idx] !== h32);
+        changed[idx] = isChanged ? 1 : 0;
+        if (isChanged) changedArea += w * h;
       }
     }
 
@@ -77,12 +88,9 @@ export class FrameProcessor {
     const changedPct = totalArea > 0 ? (changedArea / totalArea) : 0;
     const doFull = forceFull || (changedPct > this._cfg.fullframeAreaThreshold);
 
-    let out: FrameOut;
-    if (doFull) {
-      out = await this._processFullFrame(rgba, tiles, chosenEncoding);
-    } else {
-      out = await this._processPartialFrame(rgba, tiles, chosenEncoding);
-    }
+    const out = doFull
+      ? await this._processFullFrame(rgba, chosenEncoding)
+      : await this._processPartialFrame(rgba, chosenEncoding);
 
     const maxBytesPerTile = this._cfg.maxBytesPerMessage - FRAME_HEADER_BYTES - TILE_HEADER_BYTES;
     await Promise.all(out.rects.map(async (r, i) => {
@@ -96,37 +104,27 @@ export class FrameProcessor {
     return out;
   }
 
-  private async _processFullFrame(
-    rgba: RawImage,
-    tilesInfo: { idx: number; h32: number }[],
-    encoding: Encoding
-  ): Promise<FrameOut> {
-    const rectsForFull = this._splitWholeFrame(rgba.width, rgba.height, this._cfg.fullframeTileCount);
-    // Extract sequentially (sync CPU), encode in parallel on sharp's pool.
-    const rects: Rect[] = await Promise.all(rectsForFull.map(async r => {
-      const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-      const data = await this._encode(raw, r.w, r.h, rgba.channels, encoding);
-      return { x: r.x, y: r.y, w: r.w, h: r.h, data };
-    }));
+  private async _processFullFrame(rgba: RawImage, encoding: Encoding): Promise<FrameOut> {
+    const rects: Rect[] = await Promise.all(this._fullRects.map(async r => ({
+      x: r.x, y: r.y, w: r.w, h: r.h,
+      data: await this._encodeRectAsync(rgba, r.x, r.y, r.w, r.h, encoding),
+    })));
 
-    for (const t of tilesInfo) this._prev![t.idx] = t.h32;
+    this._prev!.set(this._curHashes!);
 
     return { rects, isFullFrame: true, encoding };
   }
 
-  private async _processPartialFrame(
-    rgba: RawImage,
-    tiles: { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean }[],
-    encoding: Encoding
-  ): Promise<FrameOut> {
-    const mergedRects = this._mergeChangedTiles(tiles, rgba.width, rgba.height);
+  private async _processPartialFrame(rgba: RawImage, encoding: Encoding): Promise<FrameOut> {
+    const mergedRects = this._mergeChangedTiles();
 
-    const out: Rect[] = await Promise.all(mergedRects.map(async r => {
-      const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-      const data = await this._encode(raw, r.w, r.h, rgba.channels, encoding);
-      return { ...r, data };
-    }));
-    for (const t of tiles) if (t.changed) this._prev![t.idx] = t.h32;
+    const out: Rect[] = await Promise.all(mergedRects.map(async r => ({
+      ...r,
+      data: await this._encodeRectAsync(rgba, r.x, r.y, r.w, r.h, encoding),
+    })));
+
+    const prev = this._prev!, cur = this._curHashes!, changed = this._changed!;
+    for (let i = 0; i < changed.length; i++) if (changed[i]) prev[i] = cur[i];
 
     return { rects: out, isFullFrame: false, encoding };
   }
@@ -174,92 +172,50 @@ export class FrameProcessor {
     return rects;
   }
 
-  private _getMaxFullTileSize(frameW: number, frameH: number): { maxW: number; maxH: number } {
-    const fullRects = this._splitWholeFrame(frameW, frameH, this._cfg.fullframeTileCount);
-    let maxW = 0, maxH = 0;
-    for (const r of fullRects) {
-      if (r.w > maxW) maxW = r.w;
-      if (r.h > maxH) maxH = r.h;
-    }
-    return { maxW, maxH };
-  }
-
-  private _calcGridSplits(frameW: number, frameH: number) {
-    const cols = this._cols, rows = this._rows, ts = this._cfg.tileSize;
-    const widths: number[] = new Array(cols);
-    const heights: number[] = new Array(rows);
-    const xOffsets: number[] = new Array(cols);
-    const yOffsets: number[] = new Array(rows);
-
-    let x = 0;
-    for (let c = 0; c < cols; c++) {
-      const w = Math.min(ts, frameW - x);
-      widths[c] = w;
-      xOffsets[c] = x;
-      x += w;
-    }
-    let y = 0;
-    for (let r = 0; r < rows; r++) {
-      const h = Math.min(ts, frameH - y);
-      heights[r] = h;
-      yOffsets[r] = y;
-      y += h;
-    }
-    return { widths, heights, xOffsets, yOffsets };
-  }
-
-  private _mergeChangedTiles(
-    tiles: { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean }[],
-    frameW: number,
-    frameH: number
-  ): { x: number; y: number; w: number; h: number }[] {
+  private _mergeChangedTiles(): { x: number; y: number; w: number; h: number }[] {
     const cols = this._cols, rows = this._rows;
-    const changed: boolean[][] = Array.from({ length: rows }, () => Array<boolean>(cols).fill(false));
-    const visited: boolean[][] = Array.from({ length: rows }, () => Array<boolean>(cols).fill(false));
-
-    for (let i = 0; i < tiles.length; i++) {
-      const ty = Math.floor(i / cols);
-      const tx = i % cols;
-      changed[ty][tx] = tiles[i].changed;
-    }
-
-    const { widths, heights, xOffsets, yOffsets } = this._calcGridSplits(frameW, frameH);
-    const { maxW, maxH } = this._getMaxFullTileSize(frameW, frameH);
+    const changed = this._changed!;
+    const visited = this._visited!;
+    visited.fill(0);
 
     const rects: { x: number; y: number; w: number; h: number }[] = [];
 
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        if (!changed[r][c] || visited[r][c]) continue;
+        const idx = r * cols + c;
+        if (!changed[idx] || visited[idx]) continue;
 
         // grow horizontally
         let wTiles = 0, pxW = 0;
-        while (c + wTiles < cols && changed[r][c + wTiles] && !visited[r][c + wTiles]) {
-          const nextW = pxW + widths[c + wTiles];
-          if (nextW > maxW) break;
+        while (c + wTiles < cols) {
+          const i2 = r * cols + c + wTiles;
+          if (!changed[i2] || visited[i2]) break;
+          const nextW = pxW + this._widths[c + wTiles];
+          if (nextW > this._maxW) break;
           pxW = nextW;
           wTiles++;
         }
 
         // grow vertically
-        let hTiles = 1, pxH = heights[r];
+        let hTiles = 1, pxH = this._heights[r];
         let canGrow = true;
         while (canGrow && (r + hTiles) < rows) {
-          const nextH = pxH + heights[r + hTiles];
-          if (nextH > maxH) break;
+          const nextH = pxH + this._heights[r + hTiles];
+          if (nextH > this._maxH) break;
           for (let cc = c; cc < c + wTiles; cc++) {
-            if (!changed[r + hTiles][cc] || visited[r + hTiles][cc]) { canGrow = false; break; }
+            const i2 = (r + hTiles) * cols + cc;
+            if (!changed[i2] || visited[i2]) { canGrow = false; break; }
           }
           if (!canGrow) break;
           pxH = nextH;
           hTiles++;
         }
 
-        rects.push({ x: xOffsets[c], y: yOffsets[r], w: pxW, h: pxH });
+        rects.push({ x: this._xOffsets[c], y: this._yOffsets[r], w: pxW, h: pxH });
 
         for (let rr = r; rr < r + hTiles; rr++) {
           for (let cc = c; cc < c + wTiles; cc++) {
-            visited[rr][cc] = true;
+            visited[rr * cols + cc] = 1;
           }
         }
       }
@@ -269,9 +225,38 @@ export class FrameProcessor {
   }
 
   private _initGrid(w: number, h: number) {
-    this._cols = Math.ceil(w / this._cfg.tileSize);
-    this._rows = Math.ceil(h / this._cfg.tileSize);
-    this._prev = new Uint32Array(this._cols * this._rows);
+    const ts = this._cfg.tileSize;
+    this._cols = Math.ceil(w / ts);
+    this._rows = Math.ceil(h / ts);
+    const n = this._cols * this._rows;
+
+    this._prev = new Uint32Array(n);
+    this._curHashes = new Uint32Array(n);
+    this._changed = new Uint8Array(n);
+    this._visited = new Uint8Array(n);
+
+    this._widths = new Array(this._cols);
+    this._xOffsets = new Array(this._cols);
+    for (let c = 0, x = 0; c < this._cols; c++) {
+      this._widths[c] = Math.min(ts, w - x);
+      this._xOffsets[c] = x;
+      x += this._widths[c];
+    }
+    this._heights = new Array(this._rows);
+    this._yOffsets = new Array(this._rows);
+    for (let r = 0, y = 0; r < this._rows; r++) {
+      this._heights[r] = Math.min(ts, h - y);
+      this._yOffsets[r] = y;
+      y += this._heights[r];
+    }
+
+    this._fullRects = this._splitWholeFrame(w, h, this._cfg.fullframeTileCount);
+    this._maxW = 0;
+    this._maxH = 0;
+    for (const r of this._fullRects) {
+      if (r.w > this._maxW) this._maxW = r.w;
+      if (r.h > this._maxH) this._maxH = r.h;
+    }
   }
 
   // Strided FNV-1a over the first byte of every pixel in the tile — the same
@@ -300,15 +285,17 @@ export class FrameProcessor {
     return out;
   }
 
-  private async _encode(raw: Buffer, w: number, h: number, channels: number, enc: Encoding): Promise<Buffer> {
-    switch (enc) {
-      case Encoding.JPEG:
-        return this._encodeJPEG(raw, w, h, channels);
-      case Encoding.RAW565:
-        return this._encodeRAW565(raw, channels);
-      default:
-        return this._encodeJPEG(raw, w, h, channels);
+  // Encode a rect straight from the shared frame buffer. For JPEG, sharp's
+  // extract() crops as a libvips region read — no JS-side alloc+memcpy of
+  // the rect. RAW565 still needs the extracted bytes in JS.
+  private async _encodeRectAsync(rgba: RawImage, x: number, y: number, w: number, h: number, enc: Encoding): Promise<Buffer> {
+    if (enc === Encoding.RAW565) {
+      return this._encodeRAW565(this._extractRaw(rgba, x, y, w, h), rgba.channels);
     }
+    return sharp(rgba.data, { raw: { width: rgba.width, height: rgba.height, channels: rgba.channels as 3 | 4 } })
+      .extract({ left: x, top: y, width: w, height: h })
+      .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:2:0" })
+      .toBuffer();
   }
 
   private async _encodeJPEG(raw: Buffer, w: number, h: number, channels: number): Promise<Buffer> {
@@ -351,6 +338,7 @@ export class FrameProcessor {
       raw[o + 1] = 0x00;
       raw[o + 2] = 0x00;
     }
-    return this._encode(raw, w, h, 3, enc);
+    if (enc === Encoding.RAW565) return this._encodeRAW565(raw, 3);
+    return this._encodeJPEG(raw, w, h, 3);
   }
 }
