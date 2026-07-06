@@ -16,6 +16,7 @@ export type DeviceSession = {
   cfg: DeviceConfig;
   url: string;
   lastActive: number;
+  lastMoveAt: number;
   frameId: number;
   prevFrameHash: number;
   processor: FrameProcessor;
@@ -154,6 +155,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     cfg: cfg,
     url: '',
     lastActive: Date.now(),
+    lastMoveAt: 0,
     frameId: 0,
     prevFrameHash: 0,
     processor,

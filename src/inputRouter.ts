@@ -3,7 +3,6 @@ import { TouchKind, parseFrameStatsPacket, parseOpenURLPacket, parseTouchPacket 
 import { mapPointForRotation } from "./util.js";
 
 export class InputRouter {
-  private _lastMoveAt = 0;
   private readonly _moveThrottleMs: number;
 
   constructor(moveThrottleMs = 12) {
@@ -15,9 +14,11 @@ export class InputRouter {
     if (!pkt) return;
 
     if (pkt.kind === TouchKind.Move) {
+      // Throttle per device: one InputRouter serves all connections, and a
+      // shared timestamp would let one device's drag starve the others'.
       const now = Date.now();
-      if (now - this._lastMoveAt < this._moveThrottleMs) return;
-      this._lastMoveAt = now;
+      if (now - dev.lastMoveAt < this._moveThrottleMs) return;
+      dev.lastMoveAt = now;
     }
 
     await this._dispatchTouchAsync(dev, pkt.kind, pkt.x, pkt.y);

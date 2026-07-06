@@ -17,7 +17,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   entry, and the health endpoint still says ok so watchdogs never restart.
   Fix: reject sends on a closed connection, surface CDP health via the health
   endpoint (503 → watchdog restart).
-- [ ] **16. Touch-move throttle is global across devices**
+- [x] **16. Touch-move throttle is global across devices**
   (`src/inputRouter.ts`): `_lastMoveAt` lives on the single shared InputRouter,
   so simultaneous drags on N devices share one 12 ms budget. Fix: track
   per-device (on `DeviceSession`).
