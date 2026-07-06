@@ -243,8 +243,14 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
         ({ data, info } = await fb.raw().toBuffer({ resolveWithObject: true }));
       }
       // Stale frame from before an in-place reconfigure — its geometry no
-      // longer matches the config (and would poison the new processor's grid).
-      if (info.width !== dev.cfg.width || info.height !== dev.cfg.height) {
+      // longer matches the config (and would poison the new processor's
+      // grid). cfg.width/height are the Chrome viewport (pre-display
+      // rotation) while decoded frames are post-rotation, so compare against
+      // the rotated expectation.
+      const swapped = dev.cfg.rotation === 90 || dev.cfg.rotation === 270;
+      const expectedW = swapped ? dev.cfg.height : dev.cfg.width;
+      const expectedH = swapped ? dev.cfg.width : dev.cfg.height;
+      if (info.width !== expectedW || info.height !== expectedH) {
         return;
       }
 
