@@ -29,7 +29,13 @@ async function startHeadlessIfNeededAsync(): Promise<void> {
     `--remote-debugging-port=${DEBUG_PORT}`,
     '--no-sandbox',
     '--force-device-scale-factor=1',
-    '--headless=new',
+    // Cap the HTTP/code cache: the persistent profile otherwise grows by
+    // hundreds of MB over months (and sits inside the HA add-on's backed-up
+    // /data volume). The profile only needs to persist cookies/localStorage.
+    '--disk-cache-size=104857600',
+    // NOTE: no --headless flag — Playwright's launchPersistentContext with
+    // headless:true selects the headless shell and passes its own; a custom
+    // '--headless=new' here was inert.
     ...(PREFERS_REDUCED_MOTION ? ['--force-prefers-reduced-motion'] : []),
   ];
 

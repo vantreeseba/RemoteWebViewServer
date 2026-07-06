@@ -104,14 +104,18 @@ export class DeviceBroadcaster {
   }
 
   // Control packets are tiny and carry no frame-sequencing dependency; jump
-  // the queue so they aren't stuck behind a multi-second frame drain on a
-  // slow client.
+  // ahead of queued frames so they aren't stuck behind a multi-second frame
+  // drain on a slow client. Insert after control packets already at the head
+  // — a blind unshift would deliver them newest-first, so e.g. a redirect
+  // chain's CurrentURLs would leave the client displaying the older URL.
   private _enqueueControlPacket(id: string, packet: Buffer): void {
     const peers = this._clients.get(id);
     if (!peers || peers.size === 0) return;
 
     const st = this._ensureState(id);
-    st.queue.unshift({ packets: [packet] });
+    let i = 0;
+    while (i < st.queue.length && st.queue[i].frameId == null) i++;
+    st.queue.splice(i, 0, { packets: [packet] });
     this._drainAsync(id).catch(() => {});
   }
 

@@ -2,6 +2,37 @@
 
 Findings from the 2026-07-05 performance review, ranked by impact.
 
+## Pass 3 (2026-07-05, second post-fix review)
+
+- [x] **24. REGRESSION: stale-frame guard dropped all frames on rotated
+  displays** (`src/deviceManager.ts`): the guard compared post-rotation decoded
+  dims against the pre-rotation viewport config — every frame of a 90°/270°
+  non-square display was silently dropped. Fixed and covered by a rotated
+  smoke-test session.
+- [x] **25. Concurrent connects for one id created orphan renderer zombies**
+  (`src/deviceManager.ts`): no per-id in-flight guard in `ensureDeviceAsync`;
+  now serialized through a per-id promise queue.
+- [x] **26. Setup failure after Target.createTarget leaked the tab**
+  (`src/deviceManager.ts`): the target wasn't in the devices map yet, so the
+  idle sweep could never reclaim it; now closed + session released on failure.
+- [x] **27. Static-page devices torn down under a live client**
+  (`src/index.ts`): only frames and Keepalive packets bumped `lastActive`; now
+  every client message and WS pongs count as liveness.
+- [x] **28. Disconnect racing an in-place reconfigure left the screencast
+  running with zero clients** (`src/deviceManager.ts`): added the post-start
+  zero-client recheck, mirroring `pauseScreencastAsync`.
+- [x] **29. PNG screencast was the most expensive capture choice**
+  (`src/deviceManager.ts`, `src/config.ts`): new `SCREENCAST_FORMAT`
+  (jpeg|png, default jpeg) and `SCREENCAST_QUALITY` (default 90); JPEG is
+  4-10x smaller on the CDP socket and faster to decode; set png for lossless.
+- [x] **30. Unbounded Chromium profile growth / dead `--headless=new` flag**
+  (`src/browser.ts`): capped the disk cache at 100MB (the profile only needs
+  cookies/localStorage) and removed the inert headless flag (Playwright's
+  headless shell passes its own).
+- [x] **31. Control packets delivered newest-first** (`src/broadcaster.ts`):
+  blind unshift reversed the order of e.g. a redirect chain's CurrentURLs;
+  now inserted FIFO after control packets already at the head.
+
 ## Pass 2 (2026-07-05, post-fix review)
 
 - [x] **14. Slow clients trigger a full-frame encode livelock**
