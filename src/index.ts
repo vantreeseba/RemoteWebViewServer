@@ -60,8 +60,15 @@ wss.on("connection", async (ws, req) => {
     return;
   }
 
+  // Liveness for the idle TTL: with the screencast paused on static pages,
+  // frames no longer bump lastActive, so count every sign of a live client —
+  // any message and WS pongs — or a connected-but-quiet display gets its
+  // device torn down at the 5-minute TTL and freezes.
+  ws.on("pong", () => { dev.lastActive = Date.now(); });
+
   ws.on("message", (msg, isBinary) => {
     if (!isBinary) return;
+    dev.lastActive = Date.now();
 
     const buf: Buffer = Buffer.isBuffer(msg) ? msg : Buffer.from(msg as ArrayBuffer);
     switch (buf.readUInt8(0)) {
@@ -69,7 +76,7 @@ wss.on("connection", async (ws, req) => {
         inputRouter.handleTouchPacketAsync(dev, buf).catch(e => console.warn(`Failed to handle touch packet: ${(e as Error).message}`));
         break;
       case MsgType.Keepalive:
-        dev.lastActive = Date.now();
+        // lastActive already bumped above for every message.
         break;
       case MsgType.FrameStats:
         inputRouter.handleFrameStatsPacketAsync(dev, buf).catch(() => console.warn(`Failed to handle Self test packet`));

@@ -113,6 +113,13 @@ async function reconfigureDeviceAsync(dev: DeviceSession, cfg: DeviceConfig): Pr
 
   await dev.cdp.send('Page.startScreencast', screencastParams(cfg));
   requestDeviceFullFrame(dev);
+
+  // The client may have dropped mid-reconfigure, with pauseScreencastAsync's
+  // stop landing before our start — recheck so the screencast doesn't run
+  // for nobody (mirrors pauseScreencastAsync).
+  if (broadcaster.getClientCount(dev.deviceId) === 0 && devices.get(dev.deviceId) === dev) {
+    try { await dev.cdp.send('Page.stopScreencast'); } catch { }
+  }
   return dev;
 }
 
