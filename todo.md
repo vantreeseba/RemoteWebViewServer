@@ -39,7 +39,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   clients; unshift them to the queue head.
 - [x] **22. Every disconnect logs twice** (`src/index.ts`): both the
   broadcaster's own close handler and index.ts call `removeClient`.
-- [ ] **23. Reconfigure recreates the tab and reloads the page**
+- [x] **23. Reconfigure recreates the tab and reloads the page**
   (`src/deviceManager.ts`): a param change tears down the target and reloads
   from about:blank (1–5 s blank screen). Apply metrics/screencast/processor
   changes in place on the existing target.

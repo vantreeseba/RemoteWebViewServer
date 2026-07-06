@@ -78,6 +78,44 @@ async function pauseScreencastAsync(id: string): Promise<void> {
   }
 }
 
+const makeProcessor = (cfg: DeviceConfig) => new FrameProcessor({
+  tileSize: cfg.tileSize,
+  fullframeTileCount: cfg.fullFrameTileCount,
+  fullframeAreaThreshold: cfg.fullFrameAreaThreshold,
+  jpegQuality: cfg.jpegQuality,
+  fullFrameEvery: cfg.fullFrameEvery,
+  maxBytesPerMessage: cfg.maxBytesPerMessage,
+});
+
+// Apply a config change on the existing target instead of tearing the tab
+// down: recreating it reloads the page from about:blank (1-5s blank screen
+// and lost page state) when everything a config carries can be applied via
+// emulation + a screencast restart + a fresh processor.
+async function reconfigureDeviceAsync(dev: DeviceSession, cfg: DeviceConfig): Promise<DeviceSession> {
+  dev.selfTestRunner.stop();
+  if (dev.throttleTimer) {
+    clearTimeout(dev.throttleTimer);
+    dev.throttleTimer = undefined;
+  }
+  dev.pendingB64 = undefined; // any pending frame has the old geometry
+
+  await dev.cdp.send('Page.stopScreencast');
+  await dev.cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: cfg.width,
+    height: cfg.height,
+    deviceScaleFactor: 1,
+    mobile: true
+  });
+
+  dev.cfg = cfg;
+  dev.processor = makeProcessor(cfg);
+  dev.lastActive = Date.now();
+
+  await dev.cdp.send('Page.startScreencast', screencastParams(cfg));
+  requestDeviceFullFrame(dev);
+  return dev;
+}
+
 export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
   const root = getRoot();
   if (!root) throw new Error("CDP not ready");
@@ -92,8 +130,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       requestDeviceFullFrame(device);
       return device;
     } else {
-      console.log(`[device] Reconfiguring device ${id}`);
-      await deleteDeviceAsync(device);
+      console.log(`[device] Reconfiguring device ${id} in place`);
+      return reconfigureDeviceAsync(device, cfg);
     }
   }
 
@@ -138,14 +176,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
 
   await session.send('Page.startScreencast', screencastParams(cfg));
 
-  const processor = new FrameProcessor({
-    tileSize: cfg.tileSize,
-    fullframeTileCount: cfg.fullFrameTileCount,
-    fullframeAreaThreshold: cfg.fullFrameAreaThreshold,
-    jpegQuality: cfg.jpegQuality,
-    fullFrameEvery: cfg.fullFrameEvery,
-    maxBytesPerMessage: cfg.maxBytesPerMessage,
-  });
+  const processor = makeProcessor(cfg);
 
   const newDevice: DeviceSession = {
     id: targetId,
@@ -211,10 +242,16 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
         if (dev.cfg.rotation) fb = fb.rotate(dev.cfg.rotation);
         ({ data, info } = await fb.raw().toBuffer({ resolveWithObject: true }));
       }
-      const out = await processor.processFrameAsync({ data, width: info.width, height: info.height, channels: info.channels });
+      // Stale frame from before an in-place reconfigure — its geometry no
+      // longer matches the config (and would poison the new processor's grid).
+      if (info.width !== dev.cfg.width || info.height !== dev.cfg.height) {
+        return;
+      }
+
+      const out = await dev.processor.processFrameAsync({ data, width: info.width, height: info.height, channels: info.channels });
       if (out.rects.length > 0) {
         dev.frameId = (dev.frameId + 1) >>> 0;
-        broadcaster.sendFrameChunked(id, out, dev.frameId, cfg.maxBytesPerMessage);
+        broadcaster.sendFrameChunked(id, out, dev.frameId, dev.cfg.maxBytesPerMessage);
       }
     } catch (e) {
       console.warn(`[device] Failed to process frame for ${id}: ${(e as Error).message}`);
@@ -243,7 +280,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     // `processing` guards against scheduling a second, concurrent flush while
     // an earlier one is still mid-pipeline (flushPending re-arms on exit).
     if (!newDevice.throttleTimer && !newDevice.processing) {
-      const delay = Math.max(0, cfg.minFrameInterval - (Number.isFinite(since) ? since : 0));
+      const delay = Math.max(0, newDevice.cfg.minFrameInterval - (Number.isFinite(since) ? since : 0));
       newDevice.throttleTimer = setTimeout(flushPending, delay);
     }
   });

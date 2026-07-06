@@ -55,8 +55,10 @@ RemoteWebViewServer/
   Playwright is only used to launch the browser, never for page automation.
 - **Device lifecycle** (`deviceManager.ts`): `ensureDeviceAsync(id, cfg)` reuses
   an existing session when the config is unchanged (and requests a full frame),
-  or tears it down and recreates it when the client reconnects with new params.
-  Idle sessions are cleaned up after 5 minutes by a 60s interval timer.
+  or reconfigures it in place (metrics override + screencast restart + fresh
+  processor — the page is not reloaded) when the client reconnects with new
+  params. Idle sessions are cleaned up after 5 minutes by a 60s interval timer;
+  the screencast is paused while a device has no clients.
 - **Frame pipeline**: `Page.screencastFrame` (PNG, base64) → ACK immediately →
   skip all work if the device has no connected clients → trailing throttle by
   `minFrameInterval` → `hash32` dedup of identical frames → sharp rotate +
