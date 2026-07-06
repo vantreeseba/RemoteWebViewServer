@@ -116,7 +116,27 @@ async function reconfigureDeviceAsync(dev: DeviceSession, cfg: DeviceConfig): Pr
   return dev;
 }
 
-export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
+// Serialize ensure calls per device id: a client that drops and reconnects
+// while the first connection's setup is still mid-flight would otherwise
+// create a second target, orphaning the first as an unreachable zombie whose
+// screencast and frame pipeline run until process restart.
+const ensureQueue = new Map<string, Promise<unknown>>();
+
+export function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
+  const prev = ensureQueue.get(id) ?? Promise.resolve();
+  const run = prev.then(
+    () => createOrUpdateDeviceAsync(id, cfg),
+    () => createOrUpdateDeviceAsync(id, cfg),
+  );
+  const tail = run.catch(() => { });
+  ensureQueue.set(id, tail);
+  tail.then(() => {
+    if (ensureQueue.get(id) === tail) ensureQueue.delete(id);
+  });
+  return run;
+}
+
+async function createOrUpdateDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
   const root = getRoot();
   if (!root) throw new Error("CDP not ready");
 
@@ -144,37 +164,47 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     height: cfg.height,
   });
 
-  const { sessionId } = await root.send<{ sessionId: string }>('Target.attachToTarget', {
-    targetId,
-    flatten: true
-  });
-  const session = (root as any).session(sessionId);
-
-  // Independent CDP commands; ordering on the wire is preserved, so waiting
-  // for each reply before sending the next only adds round-trip latency.
-  const setup: Promise<unknown>[] = [
-    session.send('Page.enable'),
-    session.send('Emulation.setDeviceMetricsOverride', {
-      width: cfg.width,
-      height: cfg.height,
-      deviceScaleFactor: 1,
-      mobile: true
-    }),
-  ];
-  if (PREFERS_REDUCED_MOTION) {
-    setup.push(session.send('Emulation.setEmulatedMedia', {
-      media: 'screen',
-      features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+  let sessionId = '';
+  let session: any;
+  try {
+    ({ sessionId } = await root.send<{ sessionId: string }>('Target.attachToTarget', {
+      targetId,
+      flatten: true
     }));
-  }
-  await Promise.all(setup);
+    session = (root as any).session(sessionId);
 
-  const keyboardScript = await keyboardScriptPromise;
-  if (keyboardScript) {
-    await session.send('Page.addScriptToEvaluateOnNewDocument', { source: keyboardScript });
-  }
+    // Independent CDP commands; ordering on the wire is preserved, so waiting
+    // for each reply before sending the next only adds round-trip latency.
+    const setup: Promise<unknown>[] = [
+      session.send('Page.enable'),
+      session.send('Emulation.setDeviceMetricsOverride', {
+        width: cfg.width,
+        height: cfg.height,
+        deviceScaleFactor: 1,
+        mobile: true
+      }),
+    ];
+    if (PREFERS_REDUCED_MOTION) {
+      setup.push(session.send('Emulation.setEmulatedMedia', {
+        media: 'screen',
+        features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+      }));
+    }
+    await Promise.all(setup);
 
-  await session.send('Page.startScreencast', screencastParams(cfg));
+    const keyboardScript = await keyboardScriptPromise;
+    if (keyboardScript) {
+      await session.send('Page.addScriptToEvaluateOnNewDocument', { source: keyboardScript });
+    }
+
+    await session.send('Page.startScreencast', screencastParams(cfg));
+  } catch (e) {
+    // The target isn't in the devices map yet, so the idle sweep can never
+    // reclaim it — close it here or it leaks a renderer per failed attempt.
+    try { await root.send("Target.closeTarget", { targetId }); } catch { }
+    if (sessionId) root.releaseSession(sessionId);
+    throw e;
+  }
 
   const processor = makeProcessor(cfg);
 
