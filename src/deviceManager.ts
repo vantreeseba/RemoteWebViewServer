@@ -185,12 +185,16 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     dev.pendingB64 = undefined;
 
     dev.processing = true;
+    // Stamp at flush START so minFrameInterval is a start-to-start period;
+    // stamping at the end made the effective period processing + interval,
+    // sagging fps exactly when the pipeline is busy.
+    const flushStart = Date.now();
+    dev.lastProcessedMs = flushStart;
     try {
       const pngFull = Buffer.from(b64, 'base64');
 
       const h32 = hash32(pngFull);
       if (dev.prevFrameHash === h32) {
-        dev.lastProcessedMs = Date.now();
         return;
       }
       dev.prevFrameHash = h32;
@@ -216,11 +220,11 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       console.warn(`[device] Failed to process frame for ${id}: ${(e as Error).message}`);
     } finally {
       dev.processing = false;
-      dev.lastProcessedMs = Date.now();
       // A frame that arrived mid-processing found the timer unset and
       // processing true; schedule it now so it isn't stranded.
       if (dev.pendingB64 && !dev.throttleTimer) {
-        dev.throttleTimer = setTimeout(flushPending, cfg.minFrameInterval);
+        const delay = Math.max(0, dev.cfg.minFrameInterval - (Date.now() - flushStart));
+        dev.throttleTimer = setTimeout(flushPending, delay);
       }
     }
   };

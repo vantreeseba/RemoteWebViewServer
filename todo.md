@@ -21,7 +21,7 @@ Findings from the 2026-07-05 performance review, ranked by impact.
   (`src/inputRouter.ts`): `_lastMoveAt` lives on the single shared InputRouter,
   so simultaneous drags on N devices share one 12 ms budget. Fix: track
   per-device (on `DeviceSession`).
-- [ ] **17. Effective frame period is processing + minFrameInterval**
+- [x] **17. Effective frame period is processing + minFrameInterval**
   (`src/deviceManager.ts`): `lastProcessedMs` is stamped at processing end, so
   fps sags below the configured rate exactly under load. Stamp at flush start.
 - [ ] **18. `_extractRaw` copies every encoded rect** (`src/frameProcessor.ts`):
