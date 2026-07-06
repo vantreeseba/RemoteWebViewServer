@@ -2,6 +2,48 @@
 
 Findings from the 2026-07-05 performance review, ranked by impact.
 
+## Pass 2 (2026-07-05, post-fix review)
+
+- [ ] **14. Slow clients trigger a full-frame encode livelock**
+  (`src/deviceManager.ts`, `src/broadcaster.ts`): when a client's queue is at
+  cap, frames are still fully decoded/hashed/encoded upstream and then dropped;
+  every drop re-requests a full frame, so all the wasted encodes are worst-case
+  full-frame encodes and PNG dedup stays disabled. Fix: gate `flushPending` on
+  broadcaster queue depth; on overflow keep an incoming full frame (it replaces
+  the stale queue) instead of dropping it and re-requesting.
+- [ ] **15. Server becomes a silent zombie if Chromium dies**
+  (`src/cdpRoot.ts`): the root CDP connection never signals closure — sends
+  after close never settle, every connect hangs forever and leaks a pending
+  entry, and the health endpoint still says ok so watchdogs never restart.
+  Fix: reject sends on a closed connection, surface CDP health via the health
+  endpoint (503 → watchdog restart).
+- [ ] **16. Touch-move throttle is global across devices**
+  (`src/inputRouter.ts`): `_lastMoveAt` lives on the single shared InputRouter,
+  so simultaneous drags on N devices share one 12 ms budget. Fix: track
+  per-device (on `DeviceSession`).
+- [ ] **17. Effective frame period is processing + minFrameInterval**
+  (`src/deviceManager.ts`): `lastProcessedMs` is stamped at processing end, so
+  fps sags below the configured rate exactly under load. Stamp at flush start.
+- [ ] **18. `_extractRaw` copies every encoded rect** (`src/frameProcessor.ts`):
+  sharp `.extract()` crops the shared raw buffer natively; the JS-side
+  alloc+memcpy per rect (whole frame per full frame) is avoidable.
+- [ ] **19. Grid geometry recomputed per partial frame**
+  (`src/frameProcessor.ts`): `_mergeChangedTiles` rebuilds boolean grids,
+  splits, and max-tile sizes (~40 allocations) per frame from immutable config.
+  Compute once in `_initGrid`, reuse flat typed arrays.
+- [ ] **20. Per-frame TileInfo object churn** (`src/frameProcessor.ts`): 375
+  short-lived objects per frame for grid-constant data; use preallocated
+  hash/changed typed arrays.
+- [ ] **21. Control packets queue behind frame drains** (`src/broadcaster.ts`):
+  CurrentURL/self-test packets wait behind multi-second frame drains on slow
+  clients; unshift them to the queue head.
+- [ ] **22. Every disconnect logs twice** (`src/index.ts`): both the
+  broadcaster's own close handler and index.ts call `removeClient`.
+- [ ] **23. Reconfigure recreates the tab and reloads the page**
+  (`src/deviceManager.ts`): a param change tears down the target and reloads
+  from about:blank (1–5 s blank screen). Apply metrics/screencast/processor
+  changes in place on the existing target.
+
 ## Critical — memory / dead work under realistic client conditions
 
 - [x] **1. WebSocket backpressure** (`src/broadcaster.ts`): `_drainAsync` calls
