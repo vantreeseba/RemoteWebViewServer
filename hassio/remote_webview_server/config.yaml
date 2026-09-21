@@ -41,6 +41,7 @@ options:
   inject_js_url: ""
   inject_js_allow_http: false
   user_data_dir: "/pw-data"
+  browser_locale: "en-US"
 
 schema:
   tile_size: int
@@ -62,3 +63,4 @@ schema:
   inject_js_url: str
   inject_js_allow_http: bool
   user_data_dir: str
+  browser_locale: str
