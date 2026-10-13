@@ -1,176 +1,157 @@
 # Performance TODO
 
-Findings from the 2026-07-05 performance review, ranked by impact.
+Findings from the 2026-07-05 performance reviews (passes 1–4), re-checked
+against the code on 2026-10-12 after merging upstream's pipeline rework
+(`7f1592b`, `df1e4b3`). The merge replaced `deviceManager.ts`,
+`frameProcessor.ts`, `cdpRoot.ts`, `broadcaster.ts`, `inputRouter.ts`,
+`browser.ts` and most of `index.ts` with upstream's versions, so several
+fork fixes were superseded by upstream's own and others were dropped and are
+open again. Item numbers are the original ones. The fork's implementations of
+the open items are in git history before `7f1592b`.
 
-## Pass 3 (2026-07-05, second post-fix review)
+## Open — dropped in the upstream merge
 
-- [x] **24. REGRESSION: stale-frame guard dropped all frames on rotated
-  displays** (`src/deviceManager.ts`): the guard compared post-rotation decoded
-  dims against the pre-rotation viewport config — every frame of a 90°/270°
-  non-square display was silently dropped. Fixed and covered by a rotated
-  smoke-test session.
-- [x] **25. Concurrent connects for one id created orphan renderer zombies**
-  (`src/deviceManager.ts`): no per-id in-flight guard in `ensureDeviceAsync`;
-  now serialized through a per-id promise queue.
-- [x] **26. Setup failure after Target.createTarget leaked the tab**
-  (`src/deviceManager.ts`): the target wasn't in the devices map yet, so the
-  idle sweep could never reclaim it; now closed + session released on failure.
-- [x] **27. Static-page devices torn down under a live client**
-  (`src/index.ts`): only frames and Keepalive packets bumped `lastActive`; now
-  every client message and WS pongs count as liveness.
-- [x] **28. Disconnect racing an in-place reconfigure left the screencast
-  running with zero clients** (`src/deviceManager.ts`): added the post-start
-  zero-client recheck, mirroring `pauseScreencastAsync`.
-- [x] **29. PNG screencast was the most expensive capture choice**
-  (`src/deviceManager.ts`, `src/config.ts`): new `SCREENCAST_FORMAT`
-  (jpeg|png, default jpeg) and `SCREENCAST_QUALITY` (default 90); JPEG is
-  4-10x smaller on the CDP socket and faster to decode; set png for lossless.
-- [x] **30. Unbounded Chromium profile growth / dead `--headless=new` flag**
-  (`src/browser.ts`): capped the disk cache at 100MB (the profile only needs
-  cookies/localStorage) and removed the inert headless flag (Playwright's
-  headless shell passes its own).
-- [x] **31. Control packets delivered newest-first** (`src/broadcaster.ts`):
-  blind unshift reversed the order of e.g. a redirect chain's CurrentURLs;
-  now inserted FIFO after control packets already at the head.
+### Capture cost
 
-## Pass 4 (2026-07-05, "CPU while idle" investigation)
+- [ ] **33. Immediate screencast acks make Chromium encode and ship every
+  damaged frame** (`src/deviceManager.ts`): the `Page.screencastFrame` handler
+  acks at once, so at 60 fps damage vs a 5 fps device ~90% of capture encodes
+  and CDP traffic are discarded work. Fix: hold acks until a frame is consumed
+  (measured in the fork: 60 → ~15 frames/s delivered, client fps unchanged,
+  server pipeline CPU −27%). Must release held acks on every path that drops
+  the pending frame (stop, delete, congestion wait).
+- [ ] **29. PNG screencast is the most expensive capture choice**
+  (`src/deviceManager.ts`): `startScreencastAsync` hardcodes `format: 'png'`.
+  JPEG is 4–10x smaller on the CDP socket and faster to decode. A port has to
+  deal with `pngSize()`, which reads the PNG header to detect frames that need
+  upscaling for the page-scale feature.
 
-- [x] **32. Client messages sent right after connect were silently dropped**
-  (`src/index.ts`): the ws message handler attached only after the awaited
-  device setup (~100–500 ms), so an OpenURL sent immediately on connect was
-  lost — the display sat on about:blank until the client resent or
-  reconnected. Handlers now attach first and early packets are buffered and
-  replayed. (Found because it invalidated every CPU measurement.)
-- [x] **33. Immediate screencast acks made Chromium encode+ship every damaged
-  frame** (`src/deviceManager.ts`): at 60 fps damage vs a 5 fps device, ~90%
-  of capture encodes and CDP traffic were discarded work. Acks are now held
-  until a frame is consumed (CDP flow control), pushing the minFrameInterval
-  throttle upstream: measured 60 → ~15 frames/s delivered (Chromium's ~3-frame
-  in-flight window), client fps unchanged, server pipeline CPU −27%. Idle
-  pages already cost zero server CPU (verified); remaining idle CPU is
-  Chromium compositing the page itself.
+### Connect / reconfigure latency
 
-## Pass 2 (2026-07-05, post-fix review)
+- [ ] **23. Reconfigure recreates the tab and reloads the page**
+  (`src/deviceManager.ts`): a param change calls `deleteDeviceAsync` and
+  builds a new target from about:blank (1–5 s blank screen, lost page state).
+  Fix: apply the metrics override (scaled viewport), screencast restart and a
+  fresh processor on the existing target. Chrome delivers one frame with the
+  old layout right after the change; skip it by aspect ratio instead of
+  letting the scale path stretch it.
+- [ ] **12. Device setup serializes independent CDP round trips**
+  (`src/deviceManager.ts`): `Page.enable`, metrics override, emulated media,
+  the script fetch and `Inspector.enable` are awaited one by one; ~10–25 ms
+  avoidable per (re)connect. Fix: start the script fetch early, `Promise.all`
+  the independent commands.
+- [ ] **10b. Inject-script cache is no longer warmed at startup**
+  (`src/index.ts`): the first device connect pays the fetch (up to 5 s for a
+  slow URL). The cache and the failure back-off in `src/scriptLoader.ts` are
+  still in place. The README still says the script is fetched at startup.
 
-- [x] **14. Slow clients trigger a full-frame encode livelock**
-  (`src/deviceManager.ts`, `src/broadcaster.ts`): when a client's queue is at
-  cap, frames are still fully decoded/hashed/encoded upstream and then dropped;
-  every drop re-requests a full frame, so all the wasted encodes are worst-case
-  full-frame encodes and PNG dedup stays disabled. Fix: gate `flushPending` on
-  broadcaster queue depth; on overflow keep an incoming full frame (it replaces
-  the stale queue) instead of dropping it and re-requesting.
-- [x] **15. Server becomes a silent zombie if Chromium dies**
-  (`src/cdpRoot.ts`): the root CDP connection never signals closure — sends
-  after close never settle, every connect hangs forever and leaks a pending
-  entry, and the health endpoint still says ok so watchdogs never restart.
-  Fix: reject sends on a closed connection, surface CDP health via the health
-  endpoint (503 → watchdog restart).
-- [x] **16. Touch-move throttle is global across devices**
-  (`src/inputRouter.ts`): `_lastMoveAt` lives on the single shared InputRouter,
-  so simultaneous drags on N devices share one 12 ms budget. Fix: track
-  per-device (on `DeviceSession`).
-- [x] **17. Effective frame period is processing + minFrameInterval**
-  (`src/deviceManager.ts`): `lastProcessedMs` is stamped at processing end, so
-  fps sags below the configured rate exactly under load. Stamp at flush start.
-- [x] **18. `_extractRaw` copies every encoded rect** (`src/frameProcessor.ts`):
-  sharp `.extract()` crops the shared raw buffer natively; the JS-side
-  alloc+memcpy per rect (whole frame per full frame) is avoidable.
-- [x] **19. Grid geometry recomputed per partial frame**
-  (`src/frameProcessor.ts`): `_mergeChangedTiles` rebuilds boolean grids,
-  splits, and max-tile sizes (~40 allocations) per frame from immutable config.
-  Compute once in `_initGrid`, reuse flat typed arrays.
-- [x] **20. Per-frame TileInfo object churn** (`src/frameProcessor.ts`): 375
-  short-lived objects per frame for grid-constant data; use preallocated
-  hash/changed typed arrays.
-- [x] **21. Control packets queue behind frame drains** (`src/broadcaster.ts`):
-  CurrentURL/self-test packets wait behind multi-second frame drains on slow
-  clients; unshift them to the queue head.
-- [x] **22. Every disconnect logs twice** (`src/index.ts`): both the
-  broadcaster's own close handler and index.ts call `removeClient`.
-- [x] **23. Reconfigure recreates the tab and reloads the page**
-  (`src/deviceManager.ts`): a param change tears down the target and reloads
-  from about:blank (1–5 s blank screen). Apply metrics/screencast/processor
-  changes in place on the existing target.
+### Frame processor allocation churn (`src/frameProcessor.ts`)
 
-## Critical — memory / dead work under realistic client conditions
+- [ ] **18. `_extractRaw` copies every encoded rect**: alloc + row-by-row
+  memcpy per box (a whole frame per full frame), and again for each half when
+  `_encodeFittingAsync` splits an oversize box. sharp `.extract()` can crop
+  the shared raw buffer natively.
+- [ ] **19. Grid geometry recomputed per partial frame**:
+  `_mergeChangedTiles` rebuilds two boolean grids and calls `_calcGridSplits`
+  and `_getMaxFullTileSize` (which re-runs `_splitWholeFrame`) every frame
+  from immutable config. Compute once in `_initGrid`, reuse flat typed arrays.
+- [ ] **20. Per-frame `TileInfo` object churn**: one short-lived object per
+  tile per frame (375 for 800×480 at 32 px) for grid-constant data.
 
-- [x] **1. WebSocket backpressure** (`src/broadcaster.ts`): `_drainAsync` calls
-  `ws.send()` without checking `bufferedAmount` or using the send callback, so a
-  slow client buffers unboundedly in process memory. The `await Promise.resolve()`
-  between packets only yields to the microtask queue (no real pacing); queued
-  frames are never coalesced, so slow clients receive stale intermediates;
-  `addClient` supersedes old sockets with `close()` (graceful handshake behind
-  buffered megabytes) instead of `terminate()`.
-  Fix: await the `ws.send` callback per packet, cap the frame queue and drop +
-  request a full frame on overflow, `terminate()` superseded sockets.
-- [x] **2. CDP session leak on reconfigure** (`src/cdpRoot.ts`,
-  `src/deviceManager.ts`): `CdpConnection.sessions` never deletes entries;
-  `deleteDeviceAsync` closes the target but never releases the session, leaking
-  the `CdpSession`, its handlers, and the captured `DeviceSession` graph
-  (processor state, possibly the last pending base64 PNG) on every
-  reconfigure/idle-cleanup cycle.
-  Fix: `releaseSession(sessionId)` on the root, called from `deleteDeviceAsync`.
-- [x] **3. Screencast runs with zero clients / dead sockets**
-  (`src/deviceManager.ts`, `src/index.ts`): frames are ACK'd but Chromium keeps
-  compositing + PNG-encoding for the full 5-min idle TTL after the last client
-  leaves; a client that vanishes without FIN stays `readyState OPEN` (no
-  ping/pong liveness), keeping the whole pipeline encoding for a dead peer.
-  Fix: `Page.stopScreencast` when client count hits zero, restart on reconnect;
-  server-initiated ping/pong that terminates unresponsive sockets.
-- [x] **4. Throttle race → concurrent frame processing**
-  (`src/deviceManager.ts`): `flushPending` clears `throttleTimer` on entry but
-  updates `lastProcessedMs` only in `finally`, so a frame arriving mid-processing
-  schedules a second concurrent `flushPending` exactly when processing time
-  approaches `minFrameInterval`.
-  Fix: a `processing` flag; re-arm the timer on completion if a frame is pending.
+### Broadcaster / connection handling
 
-## Hot path — per-frame CPU and allocation churn
+- [ ] **1b. Superseded sockets are closed gracefully** (`src/broadcaster.ts`):
+  `addClient` uses `close()`, which queues the close handshake behind whatever
+  the old socket still has buffered; `terminate()` frees it at once.
+- [ ] **21. Control packets queue behind frames** (`src/broadcaster.ts`):
+  CurrentURL and FrameStats packets are pushed to the tail. Impact is smaller
+  than before — congestion gating keeps at most about one frame queued — but a
+  large full frame on a slow link still delays them. If reinstated, insert
+  after control packets already at the head so their order is kept (old #31).
+- [ ] **22. Every disconnect logs twice** (`src/index.ts`,
+  `src/broadcaster.ts`): the broadcaster's own close handler and the close
+  handler in `index.ts` both call `removeClient`.
 
-- [x] **5. Per-tile alloc+copy just to hash** (`src/frameProcessor.ts`):
-  `_extractRaw` (alloc + row-by-row memcpy) runs for every tile every frame
-  solely to feed `hash32`; ~375 allocs / ~1.5 MB memcpy per 800×480 frame,
-  discarded immediately.
-  Fix: hash tiles in place with a strided walk over the frame buffer.
-- [x] **6. Serialized JPEG encodes** (`src/frameProcessor.ts`): full-frame,
-  partial-frame, and red-replacement paths `await` each `_encode` in a loop,
-  paying sum-of-encodes instead of max-of-encodes despite `sharp.concurrency`.
-  Fix: `Promise.all` the rect encodes.
-- [x] **7. `ensureAlpha()` inflates every frame by 33%**
-  (`src/deviceManager.ts`, `src/frameProcessor.ts`): screencast PNGs are opaque;
-  forcing RGBA grows every downstream copy/hash/encode.
-  Fix: drop `ensureAlpha`, parameterize the processor on `info.channels`.
-- [x] **8. Red placeholder re-encoded every time** (`src/frameProcessor.ts`):
-  `_makeRedFrameAsync` allocates, fills, and JPEG-encodes a deterministic buffer
-  on every oversized tile — potentially every frame on busy pages.
-  Fix: memoize by `${w}x${h}:${enc}`.
-- [x] **9. `buildFramePacket` extra copy** (`src/protocol.ts`): header-per-tile
-  allocs + `Buffer.concat` cost a full redundant memcpy of the payload per packet.
-  Fix: compute exact size, `allocUnsafe` once, write in place.
+### Browser
 
-## Found and fixed during verification
+- [ ] **30. Unbounded Chromium profile growth / `--headless=new` flag**
+  (`src/browser.ts`): no `--disk-cache-size`, so the persistent profile (in
+  the add-on's backed-up `/data` volume) grows over months; the fork capped it
+  at 100 MB. The fork also removed `--headless=new` as inert under
+  Playwright's headless shell; upstream passes it again — re-verify before
+  removing, since upstream's `newWindow` target creation was written with
+  full Chrome in mind.
 
-- [x] **A. Device setup errors crashed the whole server**: an exception in the
-  async `wss.on("connection")` handler (bad params, CDP failure) was an
-  unhandled rejection that killed the process for all devices.
-- [x] **B. Full-frame requests swallowed by PNG dedup on static pages**: a
-  (re)connecting client's requested full frame was dropped because the next
-  screencast frame is byte-identical to the last processed one; full-frame
-  requests now also reset the device-level dedup hash.
+## Resolved — by upstream's implementation
 
-## Lower priority
+These fork fixes were replaced by upstream code that solves the same problem.
 
+- [x] **1. WebSocket backpressure**: `isCongested()` (queue, in-flight drain
+  or `bufferedAmount > 0`) gates `flushPending`, so no frame is encoded while
+  the client is behind, and clients that send `FrameAck` are paced by a
+  2-frame window. Nothing is dropped, so no full-frame resync is needed.
+  `_drainAsync` itself still sends without awaiting the send callback.
+- [x] **14. Slow clients trigger a full-frame encode livelock**: gone with the
+  queue cap — see #1.
+- [x] **2. CDP session leak**: `removeSession` in `deleteDeviceAsync`, and on
+  `Target.detachedFromTarget`.
+- [x] **3. Screencast runs with zero clients**: `releaseDeviceAsync` stops it
+  when the last client leaves and it resumes on reconnect. (The dead-socket
+  half is the fork's heartbeat, below.)
+- [x] **4. Throttle race → concurrent frame processing**: `processing` flag
+  plus `scheduleFlush`.
+- [x] **17. Effective frame period is processing + minFrameInterval**:
+  `lastProcessedMs` is stamped at the start of processing.
+- [x] **5. Per-tile alloc+copy just to hash**: tiles are compared in place
+  against the previous frame (`_tileDiffers`), exact rather than sampled. Cost:
+  one raw RGB frame is retained per device.
+- [x] **6. Serialized JPEG encodes**: boxes are encoded with `Promise.all`.
+- [x] **7. `ensureAlpha()` inflates every frame**: frames are decoded with
+  `removeAlpha()` to packed RGB.
+- [x] **15. Server becomes a silent zombie if Chromium dies**: CDP commands
+  time out and reject on a closed connection, the process exits when the CDP
+  connection closes, the health endpoint returns 500, and a crashed tab is
+  recreated.
+- [x] **16. Touch-move throttle is global across devices**: per-device map in
+  `InputRouter`.
+- [x] **25. Concurrent connects for one id created orphan tabs**: per-id
+  operation queue (`_enqueue`).
+- [x] **26. Setup failure after `Target.createTarget` leaked the tab**: the
+  target is closed in the catch; its session is dropped on detach.
+- [x] **32. Client messages sent right after connect were dropped**: the
+  message handler is attached first and each message chains on the setup
+  promise.
+- [x] **A. Device setup errors crashed the whole server**: the connection
+  handler is synchronous, setup failures close the socket, and there is an
+  `unhandledRejection` handler.
+- [x] **B. Full-frame requests swallowed by frame dedup on static pages**:
+  `resendFullFrame` clears `processedB64` and re-processes the last frame.
+- [x] **11. Self-test timers survive device deletion**: `deleteDeviceAsync`
+  calls `selfTestRunner.stop()`.
+- [x] **27. Static-page devices torn down under a live client**: the idle
+  sweep only removes devices with zero clients.
+
+## Resolved — fork changes that survived the merge
+
+- [x] **3 (liveness half). Dead sockets keep the pipeline running**
+  (`src/index.ts`): server ping/pong heartbeat terminates clients that miss an
+  interval; pongs also bump `lastActive`.
+- [x] **9. `buildFramePacket` extra copy** (`src/protocol.ts`): exact-size
+  `allocUnsafe`, headers and tile data written in place.
 - [x] **10. Failed inject-script fetches never negatively cached**
-  (`src/scriptLoader.ts`): an unreachable `INJECT_JS_URL` adds up to 5 s to every
-  device (re)connect, serialized inside `ensureDeviceAsync`.
-  Fix: negative-cache failures with a short TTL; warm the cache at startup.
-- [x] **11. Self-test timers survive device deletion**
-  (`src/deviceManager.ts`): `deleteDeviceAsync` never calls
-  `selfTestRunner.stop()`; up to three timers (5s/70s/125s) retain the runner and
-  can push stale FrameStats packets into a new session reusing the same id.
-- [x] **12. Device setup serializes independent CDP round trips**
-  (`src/deviceManager.ts`): `Page.enable`, metrics override, emulated media, and
-  the script fetch are awaited sequentially; ~10–25 ms avoidable per (re)connect.
-  Fix: kick off the script fetch early, `Promise.all` the independent commands.
-- [x] **13. Config store never evicts** (`src/config.ts`): one entry per unique
-  `?id=` forever — and `getConfigFor` has no callers at all, so the store is
-  write-only dead memory. Fix: remove the store.
+  (`src/scriptLoader.ts`): script cache plus a 60 s failure back-off. (The
+  startup warm-up was lost — see 10b.)
+- [x] **13. Config store never evicts** (`src/config.ts`): the store is
+  removed.
+
+## No longer applicable
+
+- **8. Red placeholder re-encoded every time**: oversize boxes are now split
+  until they fit; the red tile only appears when a box under 2 px still
+  doesn't fit.
+- **24. Stale-frame guard dropped all frames on rotated displays**: the guard
+  belonged to in-place reconfigure (#23) and is gone with it.
+- **28. Disconnect racing an in-place reconfigure**: same; screencast
+  stop/start now runs through the per-id queue.
+- **31. Control packets delivered newest-first**: packets are plain FIFO
+  again (see #21).
