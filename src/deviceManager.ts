@@ -33,8 +33,6 @@ export type DeviceSession = {
   processing: boolean;
   // last processed screencast frame, to skip identical ones
   processedB64?: string;
-  // screencast frame ids held back for paced acking (see releaseScreencastAcks)
-  screencastAcks: number[];
 
   // last screencast frame, kept to re-send a full frame on request
   lastB64?: string;
@@ -95,20 +93,6 @@ export function releaseDeviceAsync(id: string): Promise<void> {
   return _enqueue(id, () => _stopScreencastIfUnusedAsync(id));
 }
 
-// Paced acking: CDP screencast flow control only sends further frames while
-// earlier ones are acked. Holding the ack until we actually consume a frame
-// pushes the minFrameInterval throttle upstream into Chromium — it stops
-// encoding and shipping frames we would discard (at 60fps damage vs a 5fps
-// device, that's >90% of capture encodes and CDP traffic saved).
-function releaseScreencastAcks(dev: DeviceSession): void {
-  if (dev.screencastAcks.length === 0) return;
-  const acks = dev.screencastAcks;
-  dev.screencastAcks = [];
-  for (const sid of acks) {
-    dev.cdp.send('Page.screencastFrameAck', { sessionId: sid }).catch(() => { });
-  }
-}
-
 async function _stopScreencastIfUnusedAsync(id: string): Promise<void> {
   const device = devices.get(id);
   if (!device || !device.screencasting || broadcaster.getClientCount(id) > 0) return;
@@ -117,7 +101,6 @@ async function _stopScreencastIfUnusedAsync(id: string): Promise<void> {
   if (device.throttleTimer) clearTimeout(device.throttleTimer);
   device.throttleTimer = undefined;
   device.pendingB64 = undefined;
-  releaseScreencastAcks(device);
   await device.cdp.send('Page.stopScreencast').catch(() => { });
   console.log(`[device] Screencast stopped for ${id}: no clients`);
 }
@@ -135,51 +118,6 @@ function startScreencastAsync(session: { send(method: any, params?: any): Promis
     maxHeight: cfg.height,
     everyNthFrame: cfg.everyNthFrame
   });
-}
-
-const makeProcessor = (cfg: DeviceConfig) => new FrameProcessor({
-  tileSize: cfg.tileSize,
-  fullframeTileCount: cfg.fullFrameTileCount,
-  fullframeAreaThreshold: cfg.fullFrameAreaThreshold,
-  jpegQuality: cfg.jpegQuality,
-  fullFrameEvery: cfg.fullFrameEvery,
-  maxBytesPerMessage: cfg.maxBytesPerMessage,
-});
-
-// Apply a config change on the existing target instead of tearing the tab
-// down: recreating it reloads the page from about:blank (1-5s blank screen
-// and lost page state) when everything a config carries can be applied via
-// emulation + a screencast restart + a fresh processor.
-async function _reconfigureDeviceAsync(dev: DeviceSession, cfg: DeviceConfig): Promise<void> {
-  dev.selfTestRunner.stop();
-  if (dev.throttleTimer) clearTimeout(dev.throttleTimer);
-  dev.throttleTimer = undefined;
-  // Frames we hold have the old geometry.
-  dev.pendingB64 = undefined;
-  dev.lastB64 = undefined;
-  dev.processedB64 = undefined;
-  releaseScreencastAcks(dev);
-  dev.acks.reset();
-
-  if (dev.screencasting) await dev.cdp.send('Page.stopScreencast');
-  dev.screencasting = false;
-
-  const viewport = getScaledViewport(cfg.width, cfg.height, cfg.scale);
-  await dev.cdp.send('Emulation.setDeviceMetricsOverride', {
-    width: viewport.width,
-    height: viewport.height,
-    deviceScaleFactor: cfg.scale,
-    mobile: true
-  });
-
-  dev.cfg = cfg;
-  dev.processor = makeProcessor(cfg);
-  dev.processor.requestFullFrame();
-  dev.scaleWarned = undefined;
-  dev.lastActive = Date.now();
-
-  await startScreencastAsync(dev.cdp, cfg);
-  dev.screencasting = true;
 }
 
 async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
@@ -206,14 +144,8 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
       }
       return device;
     } else {
-      console.log(`[device] Reconfiguring device ${id} in place`);
-      try {
-        await _reconfigureDeviceAsync(device, cfg);
-        return device;
-      } catch (e) {
-        console.warn(`[device] In-place reconfiguration of ${id} failed, recreating the tab: ${(e as Error).message}`);
-        await deleteDeviceAsync(device);
-      }
+      console.log(`[device] Reconfiguring device ${id}`);
+      await deleteDeviceAsync(device);
     }
   }
 
@@ -267,6 +199,15 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
     throw e;
   }
 
+  const processor = new FrameProcessor({
+    tileSize: cfg.tileSize,
+    fullframeTileCount: cfg.fullFrameTileCount,
+    fullframeAreaThreshold: cfg.fullFrameAreaThreshold,
+    jpegQuality: cfg.jpegQuality,
+    fullFrameEvery: cfg.fullFrameEvery,
+    maxBytesPerMessage: cfg.maxBytesPerMessage,
+  });
+
   const newDevice: DeviceSession = {
     id: targetId,
     deviceId: id,
@@ -277,14 +218,13 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
     url: '',
     lastActive: Date.now(),
     frameId: 0,
-    processor: makeProcessor(cfg),
+    processor,
     selfTestRunner: new SelfTestRunner(broadcaster),
     pendingB64: undefined,
     throttleTimer: undefined,
     lastProcessedMs: undefined,
     processing: false,
     processedB64: undefined,
-    screencastAcks: [],
     lastB64: undefined,
     resendFullFrame: () => { },
     acks: new FrameAckWindow(ACK_WINDOW_FRAMES, ACK_TIMEOUT_MS),
@@ -321,14 +261,7 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
     const b64 = dev.pendingB64;
     const frameAtMs = dev.pendingAtMs ?? Date.now();
     dev.pendingB64 = undefined;
-    // Release held acks now that we're consuming a frame — Chromium prepares
-    // the next one while we process this one.
-    releaseScreencastAcks(dev);
     if (b64 === dev.processedB64) return;
-
-    // An in-place reconfiguration may swap these while the frame is being processed.
-    const cfg = dev.cfg;
-    const processor = dev.processor;
 
     // Frames must be processed one at a time: FrameProcessor diffs against the previous
     // frame, and a later frame must never be sent before an earlier one.
@@ -344,13 +277,6 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
       let img = sharp(pngFull);
       const size = pngSize(pngFull);
       if (size && (size.width !== cfg.width || size.height !== cfg.height)) {
-        // Right after an in-place reconfiguration Chrome can still deliver a frame laid out
-        // for the old viewport, fitted into the new bounds; its aspect ratio gives it away.
-        // Skip it rather than stretch it — the resized page is painted right after.
-        if (Math.abs(size.width * cfg.height - size.height * cfg.width) > 2 * Math.max(cfg.width, cfg.height)) {
-          dev.processedB64 = undefined;
-          return;
-        }
         // Chrome renders at most at the browser's device scale factor (MAX_DEVICE_SCALE_FACTOR),
         // and a fractional scale can be a pixel off; stretch the frame to the device size.
         if (!dev.scaleWarned && size.width < cfg.width) {
@@ -362,14 +288,14 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
           .raw().toBuffer({ resolveWithObject: true });
         img = sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
       }
-      if (cfg.rotation) img = img.rotate(cfg.rotation);
+      if (dev.cfg.rotation) img = img.rotate(dev.cfg.rotation);
 
       const { data, info } = await img
         .removeAlpha()
         .raw()
         .toBuffer({ resolveWithObject: true });
       const out = await processor.processFrameAsync({ data, width: info.width, height: info.height });
-      if (out.rects.length > 0 && isCurrent() && dev.processor === processor) {
+      if (out.rects.length > 0 && isCurrent()) {
         dev.frameId = (dev.frameId + 1) >>> 0;
         const procMs = performance.now() - t0;
         const bytes = broadcaster.sendFrameChunked(id, out, dev.frameId, cfg.maxBytesPerMessage);
@@ -398,7 +324,7 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
     if (newDevice.throttleTimer || newDevice.processing || !isCurrent()) return;
     const now = Date.now();
     const since = newDevice.lastProcessedMs ? (now - newDevice.lastProcessedMs) : Infinity;
-    const interval = newDevice.minFrameIntervalOverride ?? newDevice.cfg.minFrameInterval;
+    const interval = newDevice.minFrameIntervalOverride ?? cfg.minFrameInterval;
     const delay = Math.max(0, interval - (Number.isFinite(since) ? since : 0));
     newDevice.throttleTimer = setTimeout(flushPending, delay);
   };
@@ -429,16 +355,12 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
   };
 
   session.on('Page.screencastFrame', async (evt: any) => {
+    // ACK immediately to keep producer running
+    session.send('Page.screencastFrameAck', { sessionId: evt.sessionId }).catch(() => { });
+
     newDevice.lastB64 = evt.data;
-    if (broadcaster.getClientCount(newDevice.deviceId) === 0) {
-      // No viewers: ack immediately so the stream isn't wedged while the
-      // screencast stop is still in flight.
-      session.send('Page.screencastFrameAck', { sessionId: evt.sessionId }).catch(() => { });
+    if (broadcaster.getClientCount(newDevice.deviceId) === 0)
       return;
-    }
-    // Hold the ack until this frame is consumed (paced acking, see
-    // releaseScreencastAcks) — Chromium won't encode/ship frames we'd discard.
-    newDevice.screencastAcks.push(evt.sessionId);
     newDevice.lastActive = Date.now();
     newDevice.pendingB64 = evt.data;
     newDevice.pendingAtMs = Date.now();
@@ -522,8 +444,6 @@ async function deleteDeviceAsync(device: DeviceSession, crashed = false) {
   device.selfTestRunner.stop();
 
   // A crashed tab doesn't answer, so don't wait for the command to time out.
-  if (crashed) device.screencastAcks = [];
-  else releaseScreencastAcks(device);
   if (!crashed && device.screencasting)
     await device.cdp.send("Page.stopScreencast").catch(() => { });
   await root?.send("Target.closeTarget", { targetId: device.id }).catch(() => { });
