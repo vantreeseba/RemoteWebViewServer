@@ -5,30 +5,15 @@ import type { FrameOut } from "./frameProcessor.js";
 type OutFrame = { frameId?: number | null; packets: Buffer[] };
 type BroadcasterState = { queue: OutFrame[]; sending: boolean };
 
-// Frames a slow client may fall behind before we drop queued frames and
-// request a fresh full frame instead of streaming stale deltas.
-const MAX_QUEUED_FRAMES = 2;
-
 export class DeviceBroadcaster {
   private _clients = new Map<string, Set<WebSocket>>();
   private _state = new Map<string, BroadcasterState>();
 
-  // Called when queued frames were dropped for a device (slow client); the
-  // device should request a full frame so the client resyncs.
-  public onFramesDropped?: (id: string) => void;
-
-  // Called when the last client of a device disconnects, so the device can
-  // stop paying for rendering nobody sees.
-  public onClientCountZero?: (id: string) => void;
-
   addClient(id: string, ws: WebSocket): void {
     const old = this._clients.get(id);
     if (old && old.size) {
-      // The replacement client makes old connections worthless; terminate()
-      // frees their buffered data immediately instead of queueing a close
-      // handshake behind it.
       for (const sock of old) {
-        try { sock.terminate(); } catch {}
+        try { sock.close(); } catch {}
       }
       old.clear();
     }
@@ -44,11 +29,10 @@ export class DeviceBroadcaster {
   }
 
   removeClient(id: string, ws: WebSocket): void {
-    const had = this._clients.get(id)?.delete(ws) ?? false;
+    this._clients.get(id)?.delete(ws);
     if ((this._clients.get(id)?.size ?? 0) === 0) {
       this._clients.delete(id);
       this._state.delete(id);
-      if (had) this.onClientCountZero?.(id);
     }
     console.log(`[broadcaster] Client disconnected from device ${id}, total clients: ${this._clients.get(id)?.size ?? 0}`);
   }
@@ -57,65 +41,53 @@ export class DeviceBroadcaster {
     return this._clients.get(id)?.size ?? 0;
   }
 
-  // Devices check this before paying for decode/diff/encode: a frame produced
-  // while the queue is at cap would be dropped anyway.
-  public isQueueFull(id: string): boolean {
+  // True while a client's socket still holds unsent data, i.e. the link is slower than
+  // the frame rate. Encoding more frames then would only queue up stale ones.
+  // Data already handed to the OS send buffer isn't visible here.
+  isCongested(id: string): boolean {
     const st = this._state.get(id);
-    if (!st) return false;
-    let frames = 0;
-    for (const f of st.queue) if (f.frameId != null) frames++;
-    return frames >= MAX_QUEUED_FRAMES;
+    if (st && (st.sending || st.queue.length > 0)) return true;
+    const peers = this._clients.get(id);
+    if (!peers) return false;
+    for (const ws of peers) {
+      if (ws.bufferedAmount > 0) return true;
+    }
+    return false;
   }
 
-  public sendFrameChunked(id: string, data: FrameOut, frameId: number, maxBytes = 12_000): void {
+  // Returns the number of bytes queued (0 when there is nobody to send to).
+  public sendFrameChunked(id: string, data: FrameOut, frameId: number, maxBytes = 12_000): number {
     const peers = this._clients.get(id);
-    if (!peers || peers.size === 0 || data.rects.length === 0) return;
-    if (![...peers].some(ws => ws.readyState === WebSocket.OPEN)) return;
-
-    const st = this._ensureState(id);
-
-    const queuedFrames = st.queue.filter(f => f.frameId != null).length;
-    if (queuedFrames >= MAX_QUEUED_FRAMES) {
-      // Client can't keep up: stale queued frames are worthless for a
-      // display, so drop them (keeping control packets).
-      const control = st.queue.filter(f => f.frameId == null);
-      st.queue.length = 0;
-      st.queue.push(...control);
-      if (!data.isFullFrame) {
-        // This delta's base may just have been dropped; drop it too and ask
-        // the device for a full frame to resync.
-        this.onFramesDropped?.(id);
-        return;
-      }
-      // A full frame is complete fresh state — it replaces the dropped queue.
-    }
+    if (!peers || peers.size === 0 || data.rects.length === 0) return 0;
 
     const packets = buildFramePackets(data.rects, data.encoding, frameId, data.isFullFrame, maxBytes);
+
+    const st = this._ensureState(id);
     st.queue.push({ frameId, packets });
     this._drainAsync(id).catch(() => {});
+    return packets.reduce((n, p) => n + p.length, 0);
   }
 
-  public startSelfTestMeasurement(id: string): void {
-    this._enqueueControlPacket(id, buildFrameStatsPacket());
+  // Asks the client for its render stats since the previous request (it resets them on reply).
+  public requestFrameStats(id: string): boolean {
+    const peers = this._clients.get(id);
+    if (!peers || peers.size === 0) return false;
+
+    const packet = buildFrameStatsPacket();
+    const st = this._ensureState(id);
+    st.queue.push({ packets: [packet] });
+    this._drainAsync(id).catch(() => {});
+    return true;
   }
 
   public sendCurrentURL(id: string, url: string): void {
-    this._enqueueControlPacket(id, buildCurrentURLPacket(url));
-  }
-
-  // Control packets are tiny and carry no frame-sequencing dependency; jump
-  // ahead of queued frames so they aren't stuck behind a multi-second frame
-  // drain on a slow client. Insert after control packets already at the head
-  // — a blind unshift would deliver them newest-first, so e.g. a redirect
-  // chain's CurrentURLs would leave the client displaying the older URL.
-  private _enqueueControlPacket(id: string, packet: Buffer): void {
     const peers = this._clients.get(id);
     if (!peers || peers.size === 0) return;
 
+    const packet = buildCurrentURLPacket(url);
     const st = this._ensureState(id);
-    let i = 0;
-    while (i < st.queue.length && st.queue[i].frameId == null) i++;
-    st.queue.splice(i, 0, { packets: [packet] });
+
+    st.queue.push({ packets: [packet] });
     this._drainAsync(id).catch(() => {});
   }
 
@@ -126,19 +98,6 @@ export class DeviceBroadcaster {
       this._state.set(id, st);
     }
     return st;
-  }
-
-  // Resolves true when the packet has been flushed to the socket, false on
-  // send error — this is what paces the drain loop to the client's real
-  // throughput instead of buffering unboundedly in ws.
-  private _sendAsync(ws: WebSocket, pkt: Buffer): Promise<boolean> {
-    return new Promise(resolve => {
-      try {
-        ws.send(pkt, { binary: true }, err => resolve(!err));
-      } catch {
-        resolve(false);
-      }
-    });
   }
 
   private async _drainAsync(id: string): Promise<void> {
@@ -153,21 +112,21 @@ export class DeviceBroadcaster {
       while (st.queue.length) {
         const f = st.queue.shift()!;
         for (const pkt of f.packets) {
-          const targets: WebSocket[] = [];
           for (const ws of new Set(peers)) {
-            if (ws.readyState === WebSocket.OPEN) targets.push(ws);
-            else peers.delete(ws);
-          }
-          if (targets.length === 0) { st.queue.length = 0; return; }
-
-          const results = await Promise.all(targets.map(ws => this._sendAsync(ws, pkt)));
-          for (let i = 0; i < targets.length; i++) {
-            if (!results[i]) {
-              try { targets[i].terminate(); } catch {}
-              peers.delete(targets[i]);
+            if (ws.readyState !== WebSocket.OPEN) {
+              peers.delete(ws);
+              continue;
+            }
+            try {
+              ws.send(pkt, { binary: true });
+            } catch {
+              // drop on send error
+              try { ws.close(); } catch {}
+              peers.delete(ws);
             }
           }
           if (peers.size === 0) { st.queue.length = 0; return; }
+          await Promise.resolve();
         }
       }
     } finally {

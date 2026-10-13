@@ -29,8 +29,6 @@ options:
   every_nth_frame: 1
   min_frame_interval_ms: 80
   jpeg_quality: 85
-  screencast_format: "jpeg"
-  screencast_quality: 90
   max_bytes_per_message: 61440
   ws_port: 8081
   debug_port: 9221
@@ -42,6 +40,7 @@ options:
   inject_js_allow_http: false
   user_data_dir: "/pw-data"
   browser_locale: "en-US"
+  max_device_scale_factor: 1
 
 schema:
   tile_size: int
@@ -51,8 +50,6 @@ schema:
   every_nth_frame: int
   min_frame_interval_ms: int
   jpeg_quality: int
-  screencast_format: "list(jpeg|png)"
-  screencast_quality: int
   max_bytes_per_message: int
   ws_port: int
   debug_port: int
@@ -64,3 +61,4 @@ schema:
   inject_js_allow_http: bool
   user_data_dir: str
   browser_locale: str
+  max_device_scale_factor: "float(1,4)"

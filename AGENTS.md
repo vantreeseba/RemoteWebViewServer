@@ -16,9 +16,9 @@ image and a Home Assistant OS add-on (`hassio/`).
 | --------- | ----------------------------------------------------------- |
 | Runtime   | Node.js (ESM, `"type": "module"`), TypeScript (strict)      |
 | Browser   | Headless Chromium via `playwright-core` + raw CDP WebSocket  |
-| Imaging   | `sharp` (rotate, raw RGBA extraction, JPEG encode)           |
+| Imaging   | `sharp` (rotate, raw RGB extraction, JPEG encode)            |
 | Transport | `ws` WebSocket server, custom binary protocol (v1)           |
-| Hashing   | Hand-rolled sampling FNV-1a: `hash32` (`src/util.ts`) for whole-frame PNG dedup, `_hashTile` (`src/frameProcessor.ts`) for in-place tile change detection; `xxhash-wasm` is a declared but currently unused dependency |
+| Diffing   | Exact per-tile byte compare against the previous frame (`_tileDiffers` in `src/frameProcessor.ts`); identical screencast frames are skipped by comparing their base64 payloads |
 | Config    | `env-var` + query-string params per client connection        |
 | Testing   | Vitest                                                       |
 | Deploy    | Docker (Playwright base image), Home Assistant add-on        |
@@ -35,12 +35,16 @@ RemoteWebViewServer/
 │   ├── deviceManager.ts   # DeviceSession lifecycle: create target, screencast, throttle, idle cleanup
 │   ├── frameProcessor.ts  # Tile grid diffing, full/partial frame decision, JPEG encoding
 │   ├── broadcaster.ts     # Per-device client sets, ordered frame queue, chunked send
-│   ├── protocol.ts        # Binary protocol v1: build/parse Frame, Touch, FrameStats, OpenURL, CurrentURL
+│   ├── frameAckWindow.ts  # Window of sent-but-unacknowledged frames for clients that send FrameAck
+│   ├── pipelineStats.ts   # Per-device pipeline counters (used by the self-test)
+│   ├── protocol.ts        # Binary protocol v1: build/parse Frame, Touch, FrameStats, OpenURL, CurrentURL, RequestFullFrame, FrameAck
 │   ├── inputRouter.ts     # Touch → CDP Input events, OpenURL navigation, self-test trigger
 │   ├── scriptLoader.ts    # Fetches INJECT_JS_URL script lazily on first device creation, then caches it
-│   ├── selfTest.ts        # Render-time measurement using self-test/test1.html
-│   └── util.ts            # hash32, rotation math (getRotatedDimensions, mapPointForRotation)
+│   ├── selfTest.ts        # Self-test runner: measures pipeline latency using self-test/test1.html
+│   ├── selfTestReport.ts  # Turns self-test measurements into a report and setting recommendations
+│   └── util.ts            # Rotation math (getRotatedDimensions, mapPointForRotation), getScaledViewport
 ├── self-test/             # Static HTML page for render-time self-tests
+├── tests/                 # Vitest unit tests (browser-free)
 ├── hassio/                # Home Assistant OS add-on (config.yaml, Dockerfile, run.sh)
 ├── dockerfile             # Multi-stage build on mcr.microsoft.com/playwright base image
 ├── docker-compose.rwv.yml # Example compose file
@@ -59,19 +63,25 @@ RemoteWebViewServer/
   processor — the page is not reloaded) when the client reconnects with new
   params. Idle sessions are cleaned up after 5 minutes by a 60s interval timer;
   the screencast is paused while a device has no clients.
-- **Frame pipeline**: `Page.screencastFrame` (JPEG by default, PNG via
-  `SCREENCAST_FORMAT`; base64) → ACK immediately →
-  skip all work if the device has no connected clients → trailing throttle by
-  `minFrameInterval` → `hash32` dedup of identical frames → sharp rotate +
-  raw RGBA → `FrameProcessor` tile diff → JPEG tiles → `broadcaster`
-  chunked send respecting `maxBytesPerMessage`.
+- **Frame pipeline**: `Page.screencastFrame` (PNG, base64) → ACK held until
+  the frame is consumed (paced acking, so Chromium doesn't encode frames we
+  would discard; acked immediately when the device has no clients) → trailing
+  throttle by `minFrameInterval` → wait while the client's socket is congested
+  or its `FrameAck` window is full → skip frames identical to the last
+  processed one → sharp resize-to-device (page scale) + rotate + raw RGB →
+  `FrameProcessor` tile diff → JPEG tiles → `broadcaster` chunked send
+  respecting `maxBytesPerMessage`.
 - **Full-frame triggers**: every `fullFrameEvery` frames, when changed area
-  exceeds `fullFrameAreaThreshold`, or on demand (reconnect/reconfigure). A tile
-  that cannot fit in one message is replaced with a solid red placeholder tile —
-  if you see red tiles, `maxBytesPerMessage` is too small for the tile size.
+  exceeds `fullFrameAreaThreshold`, or on demand (reconnect/reconfigure, or a
+  client `RequestFullFrame`). A box that cannot fit in one message is split in
+  halves until it does; a solid red placeholder only appears when
+  `maxBytesPerMessage` is unrealistically small.
+- **Failure handling**: CDP commands time out; a crashed tab is recreated and
+  re-navigated; losing the CDP connection exits the process so the container
+  is restarted.
 - **Binary protocol**: documented in the header comment of `src/protocol.ts`
   (little-endian, version byte = 1). Client → server: Touch, Keepalive,
-  FrameStats, OpenURL. Server → client: Frame (tiled), FrameStats, CurrentURL.
+  FrameStats, OpenURL, RequestFullFrame, FrameAck. Server → client: Frame (tiled), FrameStats, CurrentURL.
   Any protocol change must stay in sync with the RemoteWebViewClient firmware.
 - **Config precedence** (`config.ts`): WS query params (`w`, `h`, `ts`, `q`,
   `mbpm`, …) override env vars (`TILE_SIZE`, `JPEG_QUALITY`, …) which
@@ -91,9 +101,8 @@ npm run dev              # tsx src/index.ts (no build step)
 npm run build            # tsc → dist/
 npm start                # node dist/index.js (requires build)
 
-# Test — NOTE: no test files exist yet; these fail with "No test files found"
-# until the first *.test.ts is added. `coverage` additionally requires
-# installing @vitest/coverage-v8 (not currently in devDependencies).
+# Test — `coverage` additionally requires installing @vitest/coverage-v8
+# (not currently in devDependencies).
 npm test                 # vitest (watch by default)
 npm run test:run         # vitest run (single pass)
 npm run coverage         # vitest run --coverage
@@ -114,7 +123,7 @@ image provides it. Key ports: `WS_PORT` 8081 (stream), `HEALTH_PORT` 18080,
 ### TypeScript / ESM
 - **Strict mode** everywhere; no implicit `any`.
 - ESM throughout — **relative imports must use the `.js` extension**
-  (`import { hash32 } from "./util.js";`) even though sources are `.ts`.
+  (`import { getScaledViewport } from "./util.js";`) even though sources are `.ts`.
 - Async functions are usually suffixed `Async` (`ensureDeviceAsync`,
   `processFrameAsync`, `cleanupIdleAsync`). Applied loosely: `frameProcessor.ts`
   has async privates without the suffix, and `scriptLoader.ts` exports
@@ -156,8 +165,7 @@ image provides it. Key ports: `WS_PORT` 8081 (stream), `HEALTH_PORT` 18080,
   firmware repo.
 
 ### Testing
-- Vitest is configured but **no tests exist yet** — new `*.test.ts` files are
-  welcome. Pure logic (protocol build/parse, config parsing, rotation math,
+- Unit tests live in `tests/*.test.ts` (Vitest). Pure logic (protocol build/parse, config parsing, rotation math,
   tile splitting) is the priority for unit tests — it needs no browser. Keep
   new logic browser-free where possible so it stays testable.
 

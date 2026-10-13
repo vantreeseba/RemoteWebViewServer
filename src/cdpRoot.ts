@@ -8,64 +8,68 @@ type CdpMsg = {
   error?: any;
   sessionId?: string;
 };
-type Pending = { resolve: (v: any) => void; reject: (e: any) => void };
+type Pending = { method: string; resolve: (v: any) => void; reject: (e: any) => void; timer: NodeJS.Timeout };
 
-class CdpConnection {
+const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
+
+export class CdpConnection {
   private ws: WebSocket;
   private seq = 1;
   private pending = new Map<number, Pending>();
   private sessions = new Map<string, CdpSession>();
-  private _closed = false;
+  private closeHandlers: (() => void)[] = [];
 
-  constructor(ws: WebSocket) {
+  constructor(ws: WebSocket, private commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS) {
     this.ws = ws;
-    ws.on('close', () => this._onClosed(new Error('CDP connection closed')));
-    ws.on('error', (err) => this._onClosed(err));
+    ws.on('close', () => {
+      this._rejectAll(new Error('CDP closed'));
+      for (const cb of this.closeHandlers) cb();
+    });
+    ws.on('error', (err) => this._rejectAll(err));
     ws.on('message', (data) => this._onMessage(data));
   }
 
-  static async connect(wsUrl: string): Promise<CdpConnection> {
+  static async connect(wsUrl: string, commandTimeoutMs?: number): Promise<CdpConnection> {
     const ws = new WebSocket(wsUrl);
     await new Promise<void>((res, rej) => {
       ws.once('open', () => res());
       ws.once('error', rej);
     });
-    return new CdpConnection(ws);
+    return new CdpConnection(ws, commandTimeoutMs);
   }
 
-  get closed(): boolean { return this._closed; }
+  get isOpen(): boolean {
+    return this.ws.readyState === WebSocket.OPEN;
+  }
+
+  onClose(cb: () => void): void {
+    this.closeHandlers.push(cb);
+  }
 
   send<T = any>(method: string, params?: any): Promise<T> {
-    return this.sendCommand<T>(method, params);
+    return this.sendRaw<T>(method, params);
   }
 
-  // Single send path for root and session commands. Commands after the
-  // connection closes reject immediately — ws.send on a closed socket
-  // without a callback silently drops the payload, which previously left
-  // callers hanging forever and leaked their pending entries.
-  sendCommand<T = any>(method: string, params?: any, sessionId?: string): Promise<T> {
-    if (this._closed) return Promise.reject(new Error('CDP connection closed'));
+  // Rejects right away when the connection is closed and after commandTimeoutMs
+  // without a response, so a dead browser can't leave callers waiting forever.
+  sendRaw<T = any>(method: string, params?: any, sessionId?: string): Promise<T> {
+    if (!this.isOpen) return Promise.reject(new Error(`CDP closed (${method})`));
 
     const id = this.seq++;
-    const payload = JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params });
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.ws.send(payload, (err) => {
-        if (err) {
-          this.pending.delete(id);
-          reject(err);
-        }
-      });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP timeout (${method})`));
+      }, this.commandTimeoutMs);
+      this.pending.set(id, { method, resolve, reject, timer });
+      try {
+        this.ws.send(JSON.stringify({ id, method, params, sessionId }));
+      } catch (e) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(e);
+      }
     });
-  }
-
-  private _onClosed(err: Error): void {
-    if (this._closed) return;
-    this._closed = true;
-    console.error(`[cdp] Connection lost: ${err.message} — device setup will fail until restart; health endpoint now reports failure`);
-    for (const [, p] of this.pending) p.reject(err);
-    this.pending.clear();
-    this.sessions.clear();
   }
 
   session(sessionId: string): CdpSession {
@@ -77,18 +81,39 @@ class CdpConnection {
     return s;
   }
 
-  // Sessions are never removed otherwise; without this, every closed target
-  // leaks its CdpSession, its handlers, and the device state they capture.
-  releaseSession(sessionId: string): void {
+  removeSession(sessionId: string): void {
     this.sessions.delete(sessionId);
   }
 
+  get sessionCount(): number {
+    return this.sessions.size;
+  }
+
+  private _rejectAll(err: Error) {
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
+    this.pending.clear();
+  }
+
   private _onMessage(data: WebSocket.RawData) {
-    const msg = JSON.parse(String(data)) as CdpMsg;
+    let msg: CdpMsg;
+    try {
+      msg = JSON.parse(String(data)) as CdpMsg;
+    } catch {
+      console.warn('[cdp] Ignoring malformed message');
+      return;
+    }
     // Route session-scoped events
     if (msg.sessionId && msg.method) {
       const s = this.sessions.get(msg.sessionId);
       s?.emit(msg.method, msg.params);
+      return;
+    }
+    // A closed or crashed target detaches its session; drop it with its handlers.
+    if (msg.method === 'Target.detachedFromTarget' && msg.params?.sessionId) {
+      this.removeSession(msg.params.sessionId);
       return;
     }
     // Resolve command responses
@@ -96,6 +121,7 @@ class CdpConnection {
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
+      clearTimeout(p.timer);
       if (msg.error) p.reject(new Error(msg.error.message || 'CDP error'));
       else p.resolve(msg.result);
     }
@@ -108,19 +134,20 @@ export class CdpSession {
   private handlers = new Map<string, Set<Handler>>();
 
   send<T = any>(method: string, params?: any): Promise<T> {
-    return this.root.sendCommand<T>(method, params, this.sessionId);
+    return this.root.sendRaw<T>(method, params, this.sessionId);
   }
   on(method: string, cb: Handler) {
     if (!this.handlers.has(method)) this.handlers.set(method, new Set());
     this.handlers.get(method)!.add(cb);
   }
   emit(method: string, params: any) {
-    this.handlers.get(method)?.forEach(fn => fn(params));
+    this.handlers.get(method)?.forEach(fn => {
+      try { fn(params); } catch (e) { console.warn(`[cdp] Handler for ${method} failed: ${(e as Error).message}`); }
+    });
   }
 }
 
 let root: CdpConnection | null = null;
-let sharedContextId = '';
 let readyPromise: Promise<void> | null = null;
 
 export async function initCdpRootAsync(wsUrl: string): Promise<void> {
@@ -144,11 +171,3 @@ export function waitForCdpReadyAsync(): Promise<void> {
 }
 
 export function getRoot() { return root; }
-export function getSharedContextId() { return sharedContextId; }
-
-// Health-check hook: false once the browser connection has died, so
-// orchestrator watchdogs (HA add-on, docker healthcheck) restart the server
-// instead of leaving a zombie that can't create devices.
-export function isCdpHealthy(): boolean {
-  return root != null && !root.closed;
-}

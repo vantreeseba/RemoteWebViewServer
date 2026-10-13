@@ -7,8 +7,12 @@ const DEBUG_PORT = +(process.env.DEBUG_PORT || 9221);
 const PREFERS_REDUCED_MOTION = /^(1|true|yes|on)$/i.test(process.env.PREFERS_REDUCED_MOTION ?? '');
 const USER_DATA_DIR = process.env.USER_DATA_DIR || (process.platform === 'win32'
   ? 'C:\\Temp\\remotewebview-profile'
-  : '/var/temp/remotewebview-profile');
+  : '/var/tmp/remotewebview-profile');
 const BROWSER_LOCALE = env.get("BROWSER_LOCALE").default("en-US").asString();
+// Screencast frames are rendered at no more than the browser's own device scale factor, so a
+// client with scale s > this value gets frames upscaled on the server (blurry). Clients with a
+// lower scale still render at their own scale.
+const MAX_DEVICE_SCALE_FACTOR = env.get("MAX_DEVICE_SCALE_FACTOR").default("1").asFloatPositive();
 
 async function fetchJsonVersionAsync(): Promise<{ webSocketDebuggerUrl: string } | null> {
   try {
@@ -28,14 +32,8 @@ async function startHeadlessIfNeededAsync(): Promise<void> {
   const args = [
     `--remote-debugging-port=${DEBUG_PORT}`,
     '--no-sandbox',
-    '--force-device-scale-factor=1',
-    // Cap the HTTP/code cache: the persistent profile otherwise grows by
-    // hundreds of MB over months (and sits inside the HA add-on's backed-up
-    // /data volume). The profile only needs to persist cookies/localStorage.
-    '--disk-cache-size=104857600',
-    // NOTE: no --headless flag — Playwright's launchPersistentContext with
-    // headless:true selects the headless shell and passes its own; a custom
-    // '--headless=new' here was inert.
+    `--force-device-scale-factor=${MAX_DEVICE_SCALE_FACTOR}`,
+    '--headless=new',
     ...(PREFERS_REDUCED_MOTION ? ['--force-prefers-reduced-motion'] : []),
   ];
 

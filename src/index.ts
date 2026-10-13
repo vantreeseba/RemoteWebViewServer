@@ -1,13 +1,12 @@
 import http from 'http';
 import { WebSocketServer } from "ws"
 import env from "env-var";
-import { makeConfigFromParams, logDeviceConfig, readInjectScriptConfig } from "./config.js";
-import { getInjectScriptFromUrl } from "./scriptLoader.js";
-import { broadcaster, ensureDeviceAsync, cleanupIdleAsync, DeviceSession } from './deviceManager.js';
+import { makeConfigFromParams, logDeviceConfig, DeviceConfig } from "./config.js";
+import { broadcaster, ensureDeviceAsync, releaseDeviceAsync, getDevice, cleanupIdleAsync, DeviceSession } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
-import { isCdpHealthy } from './cdpRoot.js';
-import { MsgType } from './protocol.js';
+import { getRoot } from './cdpRoot.js';
+import { MsgType, parseFrameAckPacket } from './protocol.js';
 
 const WS_PORT = env.get("WS_PORT").default("8081").asIntPositive();
 const HEALTH_PORT = env.get("HEALTH_PORT").default("18080").asIntPositive();
@@ -35,92 +34,101 @@ setInterval(() => {
 
 await bootstrapAsync();
 
-// Warm the inject-script cache so the first device connect doesn't pay the fetch.
-const injectCfg = readInjectScriptConfig();
-if (injectCfg.url) void getInjectScriptFromUrl(injectCfg);
+// Every device lives in this browser, so without it there is nothing to recover in-process.
+// Exit and let Docker / the HA supervisor restart the container with a fresh browser.
+getRoot()?.onClose(() => {
+  console.error("[server] Lost the CDP connection to the browser, exiting");
+  process.exit(1);
+});
 
-wss.on("connection", async (ws, req) => {
-  alive.set(ws, true);
-  ws.on("pong", () => alive.set(ws, true));
+process.on("unhandledRejection", (reason) => {
+  console.error(`[server] Unhandled rejection: ${reason instanceof Error ? reason.stack : String(reason)}`);
+});
 
-  const url = new URL(req.url || "", `ws://localhost:${WS_PORT}`);
-  const id = url.searchParams.get("id") || "default";
-
-  let dev: DeviceSession | undefined;
-
-  const dispatch = (d: DeviceSession, buf: Buffer) => {
-    switch (buf.readUInt8(0)) {
-      case MsgType.Touch:
-        inputRouter.handleTouchPacketAsync(d, buf).catch(e => console.warn(`Failed to handle touch packet: ${(e as Error).message}`));
-        break;
-      case MsgType.Keepalive:
-        // lastActive already bumped for every message.
-        break;
-      case MsgType.FrameStats:
-        inputRouter.handleFrameStatsPacketAsync(d, buf).catch(() => console.warn(`Failed to handle Self test packet`));
-        break;
-      case MsgType.OpenURL:
-        inputRouter.handleOpenURLPacketAsync(d, buf).catch(e => console.warn(`Failed to handle OpenURL packet: ${(e as Error).message}`));
-        break;
+function handleMessage(dev: DeviceSession, buf: Buffer): void {
+  switch (buf.readUInt8(0)) {
+    case MsgType.Touch:
+      inputRouter.handleTouchPacketAsync(dev, buf).catch(e => console.warn(`Failed to handle touch packet: ${(e as Error).message}`));
+      break;
+    case MsgType.Keepalive:
+      dev.lastActive = Date.now();
+      break;
+    case MsgType.FrameStats:
+      inputRouter.handleFrameStatsPacketAsync(dev, buf).catch(() => console.warn(`Failed to handle Self test packet`));
+      break;
+    case MsgType.OpenURL:
+      inputRouter.handleOpenURLPacketAsync(dev, buf).catch(e => console.warn(`Failed to handle OpenURL packet: ${(e as Error).message}`));
+      break;
+    case MsgType.RequestFullFrame:
+      dev.resendFullFrame();
+      break;
+    case MsgType.FrameAck: {
+      const frameId = parseFrameAckPacket(buf);
+      if (frameId !== null) dev.handleFrameAck(frameId);
+      break;
     }
-  };
+  }
+}
 
-  // Attach the message handler BEFORE awaiting device setup: clients send
-  // OpenURL immediately after connecting, and a handler attached after the
-  // ~100-500ms setup silently dropped those packets — the display then sat
-  // on about:blank until the client resent or reconnected. Buffer early
-  // packets and replay them once the device exists.
-  const early: Buffer[] = [];
+wss.on("connection", (ws, req) => {
+  // Without a listener, a socket error would be thrown as an uncaught exception.
+  ws.on("error", (e) => console.warn(`[server] WebSocket error: ${e.message}`));
+  alive.set(ws, true);
+  ws.on("pong", () => {
+    alive.set(ws, true);
+    // Counts as device liveness for the idle TTL too.
+    const dev = getDevice(id);
+    if (dev) dev.lastActive = Date.now();
+  });
+
+  let id: string;
+  let cfg: DeviceConfig;
+  try {
+    const url = new URL(req.url || "", `ws://localhost:${WS_PORT}`);
+    id = url.searchParams.get("id") || "default";
+    cfg = makeConfigFromParams(url.searchParams);
+  } catch (e) {
+    console.warn(`[server] Rejected connection: ${(e as Error).message}`);
+    ws.close(1008, "invalid parameters");
+    return;
+  }
+  logDeviceConfig(id, cfg);
+
+  broadcaster.addClient(id, ws);
+  const devReady = ensureDeviceAsync(id, cfg);
+  devReady.catch(e => {
+    console.warn(`[server] Failed to set up device ${id}: ${(e as Error).message}`);
+    ws.close(1011, "device setup failed");
+  });
+
+  // Registered before the device is ready: the client sends OpenURL right after connecting.
+  // Each message chains on the same promise, so the arrival order is preserved.
   ws.on("message", (msg, isBinary) => {
     if (!isBinary) return;
 
     const buf: Buffer = Buffer.isBuffer(msg) ? msg : Buffer.from(msg as ArrayBuffer);
-    if (!dev) {
-      if (early.length < 64) early.push(buf);
-      return;
-    }
-    // Liveness for the idle TTL: with the screencast paused on static pages,
-    // frames no longer bump lastActive, so count every sign of a live client.
-    dev.lastActive = Date.now();
-    dispatch(dev, buf);
+    if (buf.length < 2) return;
+    // Look the device up on every message: it may have been recreated (crash, reconfiguration).
+    devReady.then(() => {
+      const dev = getDevice(id);
+      if (dev) handleMessage(dev, buf);
+    }, () => { });
   });
-  ws.on("pong", () => { if (dev) dev.lastActive = Date.now(); });
 
-  try {
-    const cfg = makeConfigFromParams(url.searchParams);
-    logDeviceConfig(id, cfg);
-
-    broadcaster.addClient(id, ws);
-    dev = await ensureDeviceAsync(id, cfg);
-  } catch (e) {
-    // A rejection escaping this async listener would crash the process.
-    console.warn(`[server] Failed to set up device ${id}: ${(e as Error).message}`);
-    try { ws.close(); } catch { }
-    return;
-  }
-
-  dev.lastActive = Date.now();
-  for (const buf of early.splice(0)) dispatch(dev, buf);
-
-  // The broadcaster's own once("close"/"error") handlers remove the client;
-  // calling removeClient here too double-logged every disconnect.
   ws.on("close", () => {
+    const dev = getDevice(id);
     if (dev) dev.lastActive = Date.now();
-  })
+    broadcaster.removeClient(id, ws);
+    if (broadcaster.getClientCount(id) === 0)
+      releaseDeviceAsync(id).catch(e => console.warn(`[server] Failed to release device ${id}: ${(e as Error).message}`));
+  });
 });
 
-http.createServer(async (req, res) => {
-  try {
-    if (isCdpHealthy()) {
-      res.writeHead(200); res.end('ok');
-    } else {
-      // Browser connection is gone; report unhealthy so the watchdog
-      // (HA add-on / docker healthcheck) restarts us.
-      res.writeHead(503); res.end('cdp down');
-    }
-  } catch (e) {
-    res.writeHead(500); res.end('err');
-  }
+http.createServer((req, res) => {
+  // Lets the HA watchdog / Docker healthcheck notice a dead browser.
+  const ok = getRoot()?.isOpen ?? false;
+  res.writeHead(ok ? 200 : 500);
+  res.end(ok ? 'ok' : 'cdp disconnected');
 }).listen(HEALTH_PORT);
 
 setInterval(() => cleanupIdleAsync(), 60_000);
