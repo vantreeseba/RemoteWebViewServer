@@ -1,6 +1,6 @@
 import { CDPSession } from "playwright-core";
 import sharp from "sharp";
-import { DeviceConfig, deviceConfigsEqual, readInjectScriptConfig } from "./config.js";
+import { DeviceConfig, deviceConfigsEqual, readInjectScriptConfig, readScreencastConfig } from "./config.js";
 import { getRoot } from "./cdpRoot.js";
 import { FrameProcessor } from "./frameProcessor.js";
 import { DeviceBroadcaster } from "./broadcaster.js";
@@ -8,7 +8,7 @@ import { SelfTestRunner } from "./selfTest.js";
 import { getInjectScriptFromUrl } from "./scriptLoader.js";
 import { PipelineStats, newPipelineStats } from "./pipelineStats.js";
 import { FrameAckWindow } from "./frameAckWindow.js";
-import { getScaledViewport } from "./util.js";
+import { getScaledViewport, imageSize } from "./util.js";
 
 export type DeviceSession = {
   id: string;
@@ -121,15 +121,12 @@ async function _stopScreencastIfUnusedAsync(id: string): Promise<void> {
   console.log(`[device] Screencast stopped for ${id}: no clients`);
 }
 
-// Width and height from the IHDR chunk of a PNG, without decoding it.
-function pngSize(png: Buffer): { width: number; height: number } | undefined {
-  if (png.length < 24 || png.readUInt32BE(12) !== 0x49484452) return undefined; // "IHDR"
-  return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
-}
+const SCREENCAST = readScreencastConfig();
 
 function startScreencastAsync(session: { send(method: any, params?: any): Promise<any> }, cfg: DeviceConfig) {
   return session.send('Page.startScreencast', {
-    format: 'png',
+    format: SCREENCAST.format,
+    ...(SCREENCAST.format === 'jpeg' ? { quality: SCREENCAST.quality } : {}),
     maxWidth: cfg.width,
     maxHeight: cfg.height,
     everyNthFrame: cfg.everyNthFrame
@@ -294,10 +291,10 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
     const t0 = performance.now();
     try {
       dev.processedB64 = b64;
-      const pngFull = Buffer.from(b64, 'base64');
+      const encoded = Buffer.from(b64, 'base64');
 
-      let img = sharp(pngFull);
-      const size = pngSize(pngFull);
+      let img = sharp(encoded);
+      const size = imageSize(encoded);
       if (size && (size.width !== cfg.width || size.height !== cfg.height)) {
         // Chrome renders at most at the browser's device scale factor (MAX_DEVICE_SCALE_FACTOR),
         // and a fractional scale can be a pixel off; stretch the frame to the device size.

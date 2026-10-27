@@ -16,6 +16,11 @@ export type DeviceConfig = {
   scale: number;                    // page zoom (device scale factor), 0.5..4
 };
 
+export type ScreencastConfig = {
+  format: 'jpeg' | 'png';
+  quality: number; // jpeg only, 1..100
+};
+
 export type InjectScriptConfig = {
   url?: string;
   allowHttp: boolean;
@@ -180,6 +185,18 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
   const body = entries.map(([k, v]) => `  ${k}=${v}`).join('\n');
 
   console.info(`${head}\n${body}`);
+}
+
+// How Chrome hands frames to the server. JPEG is several times smaller than PNG for
+// dashboards, which makes Chrome's encode, the base64 on the CDP socket and the decode here
+// cheaper. Chrome's encoder is deterministic, so identical frames are still skipped, and JPEG
+// artifacts stay inside their 8x8 blocks, so unchanged tiles still compare equal.
+// SCREENCAST_FORMAT=png avoids compressing changed tiles twice.
+export function readScreencastConfig(): ScreencastConfig {
+  const format = env.get("SCREENCAST_FORMAT").default("jpeg").asEnum(["jpeg", "png"]);
+  const quality = env.get("SCREENCAST_QUALITY").default("90").asIntPositive();
+  if (quality > 100) throw new Error(`invalid SCREENCAST_QUALITY (1..100): "${quality}"`);
+  return { format, quality };
 }
 
 export function readInjectScriptConfig(): InjectScriptConfig {

@@ -62,8 +62,9 @@ RemoteWebViewServer/
   or closes the tab and creates a new one when the client reconnects with new
   params. Idle sessions are cleaned up after 5 minutes by a 60s interval timer;
   the screencast is paused while a device has no clients.
-- **Frame pipeline**: `Page.screencastFrame` (PNG, base64) → ACK immediately →
-  skip all work if the device has no connected clients → trailing
+- **Frame pipeline**: `Page.screencastFrame` (JPEG by default, PNG via
+  `SCREENCAST_FORMAT`; base64) → hold the ACK until the frame is consumed or
+  dropped (`_releaseScreencastAcks`; acked at once when nobody is connected) → trailing
   throttle by `minFrameInterval` → wait while the client's socket is congested
   or its `FrameAck` window is full → skip frames identical to the last
   processed one → sharp resize-to-device (page scale) + rotate + raw RGB →
