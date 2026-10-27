@@ -2,31 +2,31 @@
 
 Findings from the 2026-07-05 performance reviews (passes 1–4), re-checked
 against the code on 2026-10-12 after merging upstream's pipeline rework
-(`7f1592b`, `df1e4b3`). The merge replaced `deviceManager.ts`,
+(`7f1592b`, `df1e4b3`). On 2026-10-27 (upstream unchanged since `8ae7efa`)
+the dropped items were re-ported onto upstream's code and measured; see the
+benchmark below. The merge replaced `deviceManager.ts`,
 `frameProcessor.ts`, `cdpRoot.ts`, `broadcaster.ts`, `inputRouter.ts`,
 `browser.ts` and most of `index.ts` with upstream's versions, so several
 fork fixes were superseded by upstream's own and others were dropped and are
 open again. Item numbers are the original ones. The fork's implementations of
 the open items are in git history before `7f1592b`.
 
-## Open — dropped in the upstream merge
+## Benchmark (2026-10-27)
 
-### Capture cost
+End-to-end, local headless shell, one 800x480 client acking frames after
+25 ms, default settings (80 ms interval), 20 s per run, two interleaved runs
+each. Before = `a7ccb88`, after = `a67dfb5`.
 
-- [ ] **33. Immediate screencast acks make Chromium encode and ship every
-  damaged frame** (`src/deviceManager.ts`): the `Page.screencastFrame` handler
-  acks at once, so at 60 fps damage vs a 5 fps device ~90% of capture encodes
-  and CDP traffic are discarded work. Fix: hold acks until a frame is consumed
-  (measured in the fork: 60 → ~15 frames/s delivered, client fps unchanged,
-  server pipeline CPU −27%). Must release held acks on every path that drops
-  the pending frame (stop, delete, congestion wait).
-- [ ] **29. PNG screencast is the most expensive capture choice**
-  (`src/deviceManager.ts`): `startScreencastAsync` hardcodes `format: 'png'`.
-  JPEG is 4–10x smaller on the CDP socket and faster to decode. A port has to
-  deal with `pngSize()`, which reads the PNG header to detect frames that need
-  upscaling for the page-scale feature.
+| Page                        | Server CPU | Chromium CPU | Server RSS   | Client fps | To device   |
+| --------------------------- | ---------- | ------------ | ------------ | ---------- | ----------- |
+| Dashboard + live clock      | 23% → 15%  | 63% → 50%    | 276 → 240 MB | 12.2       | +15% bytes  |
+| Half-screen CSS animation   | 34% → 18%  | 101% → 55%   | 300 → 242 MB | 12.2       | +4% bytes   |
+| Static page                 | 0          | 0            | 160 MB       | —          | —           |
 
-### Connect / reconfigure latency
+The extra bytes come from re-encoding JPEG capture noise (#29). Capture
+quality 95/100 removes them but costs Chromium CPU and drops to 9–11 fps.
+
+## Open
 
 - [ ] **23. Reconfigure recreates the tab and reloads the page**
   (`src/deviceManager.ts`): a param change calls `deleteDeviceAsync` and
@@ -34,53 +34,55 @@ the open items are in git history before `7f1592b`.
   Fix: apply the metrics override (scaled viewport), screencast restart and a
   fresh processor on the existing target. Chrome delivers one frame with the
   old layout right after the change; skip it by aspect ratio instead of
-  letting the scale path stretch it.
-- [ ] **12. Device setup serializes independent CDP round trips**
-  (`src/deviceManager.ts`): `Page.enable`, metrics override, emulated media,
-  the script fetch and `Inspector.enable` are awaited one by one; ~10–25 ms
-  avoidable per (re)connect. Fix: start the script fetch early, `Promise.all`
-  the independent commands.
-- [ ] **10b. Inject-script cache is no longer warmed at startup**
-  (`src/index.ts`): the first device connect pays the fetch (up to 5 s for a
-  slow URL). The cache and the failure back-off in `src/scriptLoader.ts` are
-  still in place. The README still says the script is fetched at startup.
+  letting the scale path stretch it. Latency only, not CPU/RAM; the fork's
+  version is before `7f1592b`.
+- [ ] **30b. `--headless=new` flag** (`src/browser.ts`): the fork removed it
+  as inert under Playwright's headless shell; upstream passes it again.
+  Re-verify before removing, since upstream's `newWindow` target creation was
+  written with full Chrome in mind.
+- [ ] **34. Chromium renders at 60 fps no matter how few frames are used**
+  (idea, not measured): paced acks (#33) stop capture work, but the page is
+  still laid out, painted and composited at display rate; that is most of the
+  remaining Chromium CPU. `HeadlessExperimental.beginFrame` with
+  `--enable-begin-frame-control` would let the server render only the frames
+  it sends, but it replaces the screencast entirely (screenshots per frame),
+  so it is a pipeline rewrite.
+- [ ] **35. Native memory outside the JS heap** (measured): ~240 MB RSS with
+  a ~50 MB JS heap and ~1 MB in sharp's cache. `MALLOC_ARENA_MAX=2` saved
+  ~35 MB but CPU looked worse and noisier; jemalloc (`LD_PRELOAD` in the
+  dockerfile) is the other option sharp recommends. Needs a longer run to
+  judge fragmentation over hours, not 20 s.
 
-### Frame processor allocation churn (`src/frameProcessor.ts`)
+## Resolved — 2026-10-27 (re-ported and new)
 
-- [ ] **18. `_extractRaw` copies every encoded rect**: alloc + row-by-row
-  memcpy per box (a whole frame per full frame), and again for each half when
-  `_encodeFittingAsync` splits an oversize box. sharp `.extract()` can crop
-  the shared raw buffer natively.
-- [ ] **19. Grid geometry recomputed per partial frame**:
-  `_mergeChangedTiles` rebuilds two boolean grids and calls `_calcGridSplits`
-  and `_getMaxFullTileSize` (which re-runs `_splitWholeFrame`) every frame
-  from immutable config. Compute once in `_initGrid`, reuse flat typed arrays.
-- [ ] **20. Per-frame `TileInfo` object churn**: one short-lived object per
-  tile per frame (375 for 800×480 at 32 px) for grid-constant data.
+- [x] **33. Screencast acks held until a frame is consumed** (`50e0eb0`):
+  `_releaseScreencastAcks` runs on consume, stale session, stop and delete.
+- [x] **29. JPEG screencast capture** (`bfb6767`): `SCREENCAST_FORMAT` /
+  `SCREENCAST_QUALITY` (default jpeg/90); `imageSize` in `util.ts` reads
+  PNG and JPEG headers for the page-scale check.
+- [x] **18/19/20. Frame processor allocation churn** (`59f3789`): sharp
+  crops boxes from the shared frame, grid geometry and flag arrays are built
+  once per frame size, no per-tile objects. Output byte-identical.
+- [x] **36. Tile diff did one compare per tile row** (new, `59f3789`):
+  whole pixel rows are compared first, tile segments only on rows that
+  differ. Unchanged 800x480 frame 1.35 → 0.1 ms.
+- [x] **37. sharp threads per image** (new, `a67dfb5`): `concurrency(1)`
+  instead of cores-1; ~25% less server CPU, same latency.
+- [x] **1b, 21, 22. Broadcaster** (`3b96a6c`): superseded sockets are
+  terminated, disconnects log once, control packets go ahead of frames in
+  FIFO order.
+- [x] **12, 10b. Connect latency** (`f040902`): setup commands run in
+  parallel; the inject script is fetched at startup, with in-flight sharing.
+- [x] **30. Chromium disk cache capped at 100 MB** (`c0df918`).
 
-### Broadcaster / connection handling
+## Measured, not worth changing
 
-- [ ] **1b. Superseded sockets are closed gracefully** (`src/broadcaster.ts`):
-  `addClient` uses `close()`, which queues the close handshake behind whatever
-  the old socket still has buffered; `terminate()` frees it at once.
-- [ ] **21. Control packets queue behind frames** (`src/broadcaster.ts`):
-  CurrentURL and FrameStats packets are pushed to the tail. Impact is smaller
-  than before — congestion gating keeps at most about one frame queued — but a
-  large full frame on a slow link still delays them. If reinstated, insert
-  after control packets already at the head so their order is kept (old #31).
-- [ ] **22. Every disconnect logs twice** (`src/index.ts`,
-  `src/broadcaster.ts`): the broadcaster's own close handler and the close
-  handler in `index.ts` both call `removeClient`.
-
-### Browser
-
-- [ ] **30. Unbounded Chromium profile growth / `--headless=new` flag**
-  (`src/browser.ts`): no `--disk-cache-size`, so the persistent profile (in
-  the add-on's backed-up `/data` volume) grows over months; the fork capped it
-  at 100 MB. The fork also removed `--headless=new` as inert under
-  Playwright's headless shell; upstream passes it again — re-verify before
-  removing, since upstream's `newWindow` target creation was written with
-  full Chrome in mind.
+- `sharp.cache(false)`: the operation cache holds ~1 MB here; no CPU or RSS
+  difference.
+- Chromium flags `--disable-gpu`, `--disable-software-rasterizer`,
+  `--num-raster-threads=1`, `--disable-gpu-compositing`: no CPU difference
+  on a quiet machine (Playwright already passes the usual background-work
+  switches).
 
 ## Resolved — by upstream's implementation
 
@@ -103,7 +105,7 @@ These fork fixes were replaced by upstream code that solves the same problem.
 - [x] **17. Effective frame period is processing + minFrameInterval**:
   `lastProcessedMs` is stamped at the start of processing.
 - [x] **5. Per-tile alloc+copy just to hash**: tiles are compared in place
-  against the previous frame (`_tileDiffers`), exact rather than sampled. Cost:
+  against the previous frame (`_markChangedTiles`), exact rather than sampled. Cost:
   one raw RGB frame is retained per device.
 - [x] **6. Serialized JPEG encodes**: boxes are encoded with `Promise.all`.
 - [x] **7. `ensureAlpha()` inflates every frame**: frames are decoded with

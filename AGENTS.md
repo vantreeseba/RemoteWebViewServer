@@ -18,7 +18,7 @@ image and a Home Assistant OS add-on (`hassio/`).
 | Browser   | Headless Chromium via `playwright-core` + raw CDP WebSocket  |
 | Imaging   | `sharp` (rotate, raw RGB extraction, JPEG encode)            |
 | Transport | `ws` WebSocket server, custom binary protocol (v1)           |
-| Diffing   | Exact per-tile byte compare against the previous frame (`_tileDiffers` in `src/frameProcessor.ts`); identical screencast frames are skipped by comparing their base64 payloads |
+| Diffing   | Exact byte compare against the previous frame, whole rows first, then per tile (`_markChangedTiles` in `src/frameProcessor.ts`); identical screencast frames are skipped by comparing their base64 payloads |
 | Config    | `env-var` + query-string params per client connection        |
 | Testing   | Vitest                                                       |
 | Deploy    | Docker (Playwright base image), Home Assistant add-on        |
