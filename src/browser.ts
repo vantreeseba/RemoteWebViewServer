@@ -34,6 +34,9 @@ async function startHeadlessIfNeededAsync(): Promise<void> {
     '--no-sandbox',
     `--force-device-scale-factor=${MAX_DEVICE_SCALE_FACTOR}`,
     '--headless=new',
+    // The profile persists (in the add-on it is inside the backed-up /data volume); without a
+    // cap its HTTP/code cache grows by hundreds of MB over months.
+    '--disk-cache-size=104857600',
     ...(PREFERS_REDUCED_MOTION ? ['--force-prefers-reduced-motion'] : []),
   ];
 
