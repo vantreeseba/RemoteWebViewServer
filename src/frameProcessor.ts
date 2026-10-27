@@ -1,8 +1,11 @@
-import os from "node:os";
 import sharp from "sharp";
 import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "./protocol.js";
 
-sharp.concurrency(Math.max(1, os.cpus().length - 1));
+// One libvips thread per image: the boxes of a frame are already encoded in parallel on the
+// libuv thread pool, and splitting each small box across more threads costs more than it
+// saves (measured ~25% more server CPU at cores-1, same latency). It is also sharp's own
+// default on glibc without jemalloc (the Docker image), to limit memory fragmentation.
+sharp.concurrency(1);
 
 // Packed RGB, no alpha: 25% less to decode, compare and encode than RGB.
 export type RGB = { data: Buffer; width: number; height: number };
