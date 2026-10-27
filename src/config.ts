@@ -194,8 +194,8 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
 // artifacts stay inside their 8x8 blocks, so unchanged tiles still compare equal.
 // With SCREENCAST_PASSTHROUGH (default on) changed tiles are cut out of Chrome's JPEG
 // without compressing them again, and Chrome encodes at the device's JPEG quality;
-// SCREENCAST_QUALITY then only applies to devices that can't use it (rotated displays,
-// tile sizes that aren't a multiple of 16).
+// SCREENCAST_QUALITY then only applies to devices that can't use it (tile sizes that aren't
+// a multiple of 16, or rotated displays whose size isn't).
 export function readScreencastConfig(): ScreencastConfig {
   const format = env.get("SCREENCAST_FORMAT").default("jpeg").asEnum(["jpeg", "png"]);
   const quality = env.get("SCREENCAST_QUALITY").default("90").asIntPositive();

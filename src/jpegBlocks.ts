@@ -8,7 +8,8 @@
 //
 // Supported: baseline/extended sequential Huffman JPEG, 8-bit, 3 components in one
 // interleaved scan, no restart intervals (Chrome writes none). Anything else returns null
-// and the caller falls back to decoding with sharp.
+// and the caller falls back to decoding with sharp. Rotation by quarter turns is lossless
+// too (rotateJpegBlocks), for images that are a whole number of MCUs.
 
 export type JpegComponent = {
   id: number;
@@ -260,6 +261,102 @@ function _decodeScan(
 
   if (rd.padBytes > 4) return null;
   return { width, height, mcuW, mcuH, mcusX, mcusY, components, blocksPerMcu, coef, dqt };
+}
+
+// ---------------------------------------------------------------------------------------
+// Lossless rotation (what `jpegtran -rotate` does)
+
+// Natural (row-major, row = vertical frequency) index of each zigzag position.
+const NATURAL_ORDER = [
+  0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+  12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+  35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+  58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+];
+const ZIGZAG_OF = new Int32Array(64);
+NATURAL_ORDER.forEach((n, k) => { ZIGZAG_OF[n] = k; });
+
+// For each output zigzag position: the input zigzag position it comes from, and the sign.
+// Rotating a block's pixels maps to moving and negating its DCT coefficients:
+//  90° clockwise = transpose, then mirror horizontally: out[v][u] = (-1)^u in[u][v]
+// 180°           = mirror both ways:                  out[v][u] = (-1)^(u+v) in[v][u]
+// 270° clockwise = transpose, then mirror vertically:   out[v][u] = (-1)^v in[u][v]
+function coefficientMap(rotation: 90 | 180 | 270): { src: Int32Array; neg: Uint8Array } {
+  const src = new Int32Array(64), neg = new Uint8Array(64);
+  for (let k = 0; k < 64; k++) {
+    const n = NATURAL_ORDER[k], v = n >> 3, u = n & 7;
+    const transposed = rotation !== 180;
+    src[k] = ZIGZAG_OF[transposed ? u * 8 + v : n];
+    neg[k] = (rotation === 90 ? u : rotation === 270 ? v : u + v) & 1;
+  }
+  return { src, neg };
+}
+const COEF_MAPS = { 90: coefficientMap(90), 180: coefficientMap(180), 270: coefficientMap(270) };
+
+// Quantization tables follow their coefficients: transposed for a quarter turn.
+function transposeDqt(seg: Buffer): Buffer {
+  const out = Buffer.from(seg);
+  let p = 4;
+  while (p < out.length) {
+    const wide = out[p] >> 4 ? 2 : 1;
+    for (let k = 0; k < 64; k++) {
+      const n = NATURAL_ORDER[k];
+      const from = ZIGZAG_OF[(n & 7) * 8 + (n >> 3)];
+      for (let b = 0; b < wide; b++) out[p + 1 + k * wide + b] = seg[p + 1 + from * wide + b];
+    }
+    p += 1 + 64 * wide;
+  }
+  return out;
+}
+
+// Rotates the image clockwise by moving and sign-flipping DCT coefficients; no pixel is
+// decoded, so nothing is lost. Returns null when the image isn't a whole number of MCUs:
+// the padding of the right/bottom edge would end up on the left/top.
+export function rotateJpegBlocks(img: JpegBlocks, rotation: 90 | 180 | 270): JpegBlocks | null {
+  if (img.width % img.mcuW !== 0 || img.height % img.mcuH !== 0) return null;
+  const quarter = rotation !== 180;
+  const { src: map, neg } = COEF_MAPS[rotation];
+  const comps = img.components;
+  const outComps = quarter ? comps.map(c => ({ ...c, h: c.v, v: c.h })) : comps;
+  const outMcusX = quarter ? img.mcusY : img.mcusX;
+  const bpm = img.blocksPerMcu;
+  const coef = img.coef;
+  const out = new Int16Array(coef.length);
+
+  let compOff = 0;
+  for (let ci = 0; ci < comps.length; ci++) {
+    const { h, v } = comps[ci];
+    const oh = outComps[ci].h, ov = outComps[ci].v;
+    const bw = img.mcusX * h, bh = img.mcusY * v; // this component's plane, in blocks
+    for (let by = 0; by < bh; by++) {
+      for (let bx = 0; bx < bw; bx++) {
+        const s = ((((by / v) | 0) * img.mcusX + ((bx / h) | 0)) * bpm + compOff + (by % v) * h + (bx % h)) * 64;
+        let ox: number, oy: number;
+        if (rotation === 90) { ox = bh - 1 - by; oy = bx; }
+        else if (rotation === 270) { ox = by; oy = bw - 1 - bx; }
+        else { ox = bw - 1 - bx; oy = bh - 1 - by; }
+        const d = ((((oy / ov) | 0) * outMcusX + ((ox / oh) | 0)) * bpm + compOff + (oy % ov) * oh + (ox % oh)) * 64;
+        for (let k = 0; k < 64; k++) {
+          const c = coef[s + map[k]];
+          out[d + k] = neg[k] ? -c : c;
+        }
+      }
+    }
+    compOff += h * v;
+  }
+
+  return {
+    width: quarter ? img.height : img.width,
+    height: quarter ? img.width : img.height,
+    mcuW: quarter ? img.mcuH : img.mcuW,
+    mcuH: quarter ? img.mcuW : img.mcuH,
+    mcusX: outMcusX,
+    mcusY: quarter ? img.mcusX : img.mcusY,
+    components: outComps,
+    blocksPerMcu: bpm,
+    coef: out,
+    dqt: quarter ? img.dqt.map(transposeDqt) : img.dqt,
+  };
 }
 
 // ---------------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import sharp from "sharp";
-import { decodeJpegBlocks, encodeJpegBlocks, JpegBlocks } from "../src/jpegBlocks.js";
+import { decodeJpegBlocks, encodeJpegBlocks, rotateJpegBlocks, JpegBlocks } from "../src/jpegBlocks.js";
 
 // Smooth gradients plus some noise and hard edges: exercises long AC runs, ZRL and EOB.
 function testImage(w: number, h: number): Buffer {
@@ -114,5 +114,51 @@ describe("jpegBlocks", () => {
     const truncated = await jpeg(64, 64, "4:2:0");
     expect(decodeJpegBlocks(truncated.subarray(0, truncated.length - 40))).toBeNull();
     expect(decodeJpegBlocks(truncated)).not.toBeNull();
+  });
+
+  describe("rotation", () => {
+    const whole = (img: JpegBlocks) => encodeJpegBlocks(img, 0, 0, img.mcusX, img.mcusY, img.width, img.height);
+
+    // Difference to sharp rotating the decoded pixels. Not zero: the decoder's IDCT and
+    // chroma upsampling round slightly differently on rotated blocks (on a real Chrome frame:
+    // mean 0.01, max 3 levels).
+    async function diffToSharp(src: Buffer, rotation: 90 | 180 | 270) {
+      const img = rotateJpegBlocks(decodeJpegBlocks(src)!, rotation)!;
+      const ours = await pixels(whole(img));
+      const { data, info } = await sharp(src).rotate(rotation).raw().toBuffer({ resolveWithObject: true });
+      const ref = { data, width: info.width, height: info.height };
+      expect([ours.width, ours.height]).toEqual([ref.width, ref.height]);
+      let max = 0, sum = 0;
+      for (let i = 0; i < ours.data.length; i++) {
+        const d = Math.abs(ours.data[i] - ref.data[i]);
+        max = Math.max(max, d); sum += d;
+      }
+      return { max, mean: sum / ours.data.length };
+    }
+
+    for (const ss of ["4:4:4", "4:2:0"] as const) {
+      for (const r of [90, 180, 270] as const) {
+        it(`rotates ${ss} by ${r}° like rotating the pixels`, async () => {
+          const { max, mean } = await diffToSharp(await jpeg(320, 176, ss), r);
+          expect(mean).toBeLessThan(0.5);
+          expect(max).toBeLessThanOrEqual(ss === "4:4:4" ? 3 : 6);
+        });
+      }
+    }
+
+    it("is lossless: four quarter turns give back the same coefficients and tables", async () => {
+      const img = decodeJpegBlocks(await jpeg(320, 176, "4:2:0"))!;
+      let r: JpegBlocks = img;
+      for (let i = 0; i < 4; i++) r = rotateJpegBlocks(r, 90)!;
+      expect(r.coef).toEqual(img.coef);
+      expect(Buffer.concat(r.dqt).equals(Buffer.concat(img.dqt))).toBe(true);
+      expect(rotateJpegBlocks(rotateJpegBlocks(img, 90)!, 270)!.coef).toEqual(img.coef);
+      expect(rotateJpegBlocks(rotateJpegBlocks(img, 180)!, 180)!.coef).toEqual(img.coef);
+    });
+
+    it("refuses images that aren't a whole number of MCUs", async () => {
+      expect(rotateJpegBlocks(decodeJpegBlocks(await jpeg(333, 201, "4:2:0"))!, 90)).toBeNull();
+      expect(rotateJpegBlocks(decodeJpegBlocks(await jpeg(320, 200, "4:2:0"))!, 180)).toBeNull();
+    });
   });
 });

@@ -79,11 +79,14 @@ quality 95/100 removes them but costs Chromium CPU and drops to 9–11 fps.
   `src/jpegBlocks.ts` decodes Chrome's JPEG to DCT coefficients only, the
   processor diffs tiles on those and cuts changed tiles out losslessly
   (`jpegtran -crop` style), with Chrome encoding at the device's quality.
-  Falls back to the pixel path for rotation, rescaled frames, tile sizes
-  that aren't a multiple of 16, and unsupported JPEGs; `SCREENCAST_PASSTHROUGH=false`
+  Rotated displays are rotated in the DCT domain too (`jpegtran -rotate`
+  style) when the frame is a whole number of 16 px MCUs. Falls back to the
+  pixel path for rescaled frames, tile sizes that aren't a multiple of 16,
+  rotated displays whose size isn't, and unsupported JPEGs; `SCREENCAST_PASSTHROUGH=false`
   turns it off. Measured against the re-encode path (4 paired runs, noisy
-  machine): server CPU ~20% lower, server RSS 25–45 MB lower, bytes per frame
-  back to the PNG-capture level. Not yet tried on real ESP32 hardware.
+  machine): server CPU ~20% lower, bytes per frame back to the PNG-capture
+  level. Server RSS looked 25–45 MB lower in those runs but varies a lot
+  between runs. Rotated 800x480 display: server CPU 21% -> 17%. Not yet tried on real ESP32 hardware.
 
 ## Measured, not worth changing
 

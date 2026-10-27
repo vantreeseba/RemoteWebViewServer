@@ -3,7 +3,7 @@ import sharp from "sharp";
 import { DeviceConfig, deviceConfigsEqual, readInjectScriptConfig, readScreencastConfig } from "./config.js";
 import { getRoot } from "./cdpRoot.js";
 import { FrameProcessor, JpegFrame, RGB } from "./frameProcessor.js";
-import { decodeJpegBlocks } from "./jpegBlocks.js";
+import { decodeJpegBlocks, rotateJpegBlocks } from "./jpegBlocks.js";
 import { DeviceBroadcaster } from "./broadcaster.js";
 import { SelfTestRunner } from "./selfTest.js";
 import { getInjectScriptFromUrl } from "./scriptLoader.js";
@@ -127,10 +127,11 @@ async function _stopScreencastIfUnusedAsync(id: string): Promise<void> {
 const SCREENCAST = readScreencastConfig();
 
 // Whether changed tiles are cut out of Chrome's JPEG frames instead of being decoded and
-// compressed again. Rotation needs the pixels; the tile grid must fall on JPEG's 16 px MCUs.
+// compressed again. The tile grid must fall on JPEG's 16 px MCUs; a rotated frame must be a
+// whole number of MCUs (rotateJpegBlocks).
 function usesPassthrough(cfg: DeviceConfig): boolean {
-  return SCREENCAST.format === 'jpeg' && SCREENCAST.passthrough &&
-    cfg.rotation === 0 && cfg.tileSize % 16 === 0;
+  return SCREENCAST.format === 'jpeg' && SCREENCAST.passthrough && cfg.tileSize % 16 === 0 &&
+    (cfg.rotation === 0 || (cfg.width % 16 === 0 && cfg.height % 16 === 0));
 }
 
 function startScreencastAsync(session: { send(method: any, params?: any): Promise<any> }, cfg: DeviceConfig) {
@@ -153,9 +154,10 @@ async function decodeFrameAsync(dev: DeviceSession, encoded: Buffer): Promise<RG
   const size = imageSize(encoded);
   const sizeOk = !!size && size.width === cfg.width && size.height === cfg.height;
   if (sizeOk && usesPassthrough(cfg)) {
-    const blocks = decodeJpegBlocks(encoded);
+    let blocks = decodeJpegBlocks(encoded);
+    if (blocks && cfg.rotation) blocks = rotateJpegBlocks(blocks, cfg.rotation);
     if (blocks && dev.processor.acceptsJpegBlocks(blocks))
-      return { width: blocks.width, height: blocks.height, jpeg: encoded, blocks };
+      return { width: blocks.width, height: blocks.height, jpeg: encoded, blocks, rotation: cfg.rotation };
     if (!dev.passthroughWarned) {
       dev.passthroughWarned = true;
       console.warn(`[device] ${id}: can't cut tiles out of the screencast JPEG directly, re-encoding them`);

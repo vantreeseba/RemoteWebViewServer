@@ -68,9 +68,10 @@ RemoteWebViewServer/
   dropped (`_releaseScreencastAcks`; acked at once when nobody is connected) → trailing
   throttle by `minFrameInterval` → wait while the client's socket is congested
   or its `FrameAck` window is full → skip frames identical to the last
-  processed one → either (JPEG, no rotation, tile size a multiple of 16,
-  frame already device-sized) decode to DCT coefficients only
-  (`src/jpegBlocks.ts`), diff tiles on those and cut changed tiles out
+  processed one → either (JPEG, tile size a multiple of 16, frame already
+  device-sized, and for rotation a frame that is a whole number of 16 px
+  MCUs) decode to DCT coefficients only (`src/jpegBlocks.ts`), rotate them
+  losslessly if needed, diff tiles on those and cut changed tiles out
   losslessly, with Chrome encoding at the device's `jpegQuality`; or sharp
   resize-to-device (page scale) + rotate + raw RGB → `FrameProcessor` tile
   diff → JPEG tiles. Then → `broadcaster` chunked send

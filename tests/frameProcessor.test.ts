@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import sharp from "sharp";
 import { FrameProcessor, FrameProcessorCfg, RGB, BPP, JpegFrame } from "../src/frameProcessor.js";
-import { decodeJpegBlocks } from "../src/jpegBlocks.js";
+import { decodeJpegBlocks, rotateJpegBlocks } from "../src/jpegBlocks.js";
 import { buildFramePackets, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "../src/protocol.js";
 
 const DEFAULT_CFG: FrameProcessorCfg = {
@@ -168,7 +168,7 @@ describe("FrameProcessor", () => {
     async function jpegFrame(frame: RGB): Promise<JpegFrame> {
       const jpeg = await sharp(frame.data, { raw: { width: frame.width, height: frame.height, channels: BPP } })
         .jpeg({ quality: 85, chromaSubsampling: "4:2:0" }).toBuffer();
-      return { width: frame.width, height: frame.height, jpeg, blocks: decodeJpegBlocks(jpeg)! };
+      return { width: frame.width, height: frame.height, jpeg, blocks: decodeJpegBlocks(jpeg)!, rotation: 0 };
     }
 
     it("finds the same changed tiles as the pixel path and sends Chrome's blocks unchanged", async () => {
@@ -217,6 +217,31 @@ describe("FrameProcessor", () => {
         const back = decodeJpegBlocks(r.data)!;
         expect([back.width, back.height]).toEqual([r.w, r.h]);
       }
+    });
+
+    it("assembles a rotated frame like rotating the pixels, including off-grid fallback crops", async () => {
+      const src = noiseFrame(96, 64, 5);
+      const jpeg = await sharp(src.data, { raw: { width: 96, height: 64, channels: BPP } })
+        .jpeg({ quality: 85, chromaSubsampling: "4:2:0" }).toBuffer();
+      const blocks = rotateJpegBlocks(decodeJpegBlocks(jpeg)!, 90)!;
+      const frame: JpegFrame = { width: 64, height: 96, jpeg, blocks, rotation: 90 };
+
+      // Small enough that noise boxes get split below one MCU, which takes the fallback.
+      const fp = new FrameProcessor({ ...DEFAULT_CFG, maxBytesPerMessage: 400 });
+      const out = await fp.processFrameAsync(frame);
+      expect(out.rects.some(r => r.w % 16 !== 0 || r.h % 16 !== 0)).toBe(true);
+
+      const canvas = Buffer.alloc(64 * 96 * BPP);
+      for (const r of out.rects) {
+        const px = await sharp(r.data).raw().toBuffer();
+        for (let y = 0; y < r.h; y++) px.copy(canvas, ((r.y + y) * 64 + r.x) * BPP, y * r.w * BPP, (y + 1) * r.w * BPP);
+      }
+      const ref = await sharp(jpeg).rotate(90).raw().toBuffer();
+      let sum = 0;
+      for (let i = 0; i < ref.length; i++) sum += Math.abs(canvas[i] - ref[i]);
+      // Tiles decode on their own, so chroma at tile borders differs a little; a wrong
+      // rotation or position would be off by ~85 on noise.
+      expect(sum / ref.length).toBeLessThan(12);
     });
 
     it("rejects a tile grid that doesn't fall on the MCU grid", async () => {

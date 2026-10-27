@@ -13,8 +13,9 @@ export type RGB = { data: Buffer; width: number; height: number };
 export const BPP = 3; // bytes per pixel
 
 // A frame that is already JPEG, decoded only to DCT coefficients (see jpegBlocks.ts).
-// Changed tiles are cut out of it without being compressed again.
-export type JpegFrame = { width: number; height: number; jpeg: Buffer; blocks: JpegBlocks };
+// Changed tiles are cut out of it without being compressed again. `blocks` are already
+// rotated by `rotation`; `jpeg` is the frame as captured.
+export type JpegFrame = { width: number; height: number; jpeg: Buffer; blocks: JpegBlocks; rotation: number };
 
 function isJpegFrame(f: RGB | JpegFrame): f is JpegFrame {
   return (f as JpegFrame).blocks !== undefined;
@@ -363,6 +364,7 @@ export class FrameProcessor {
         Math.ceil(b.w / j.mcuW), Math.ceil(b.h / j.mcuH), b.w, b.h);
     }
     return sharp(frame.jpeg)
+      .rotate(frame.rotation) // before extract: sharp applies them in call order
       .extract({ left: b.x, top: b.y, width: b.w, height: b.h })
       .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:2:0" })
       .toBuffer();

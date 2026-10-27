@@ -66,7 +66,7 @@ services:
       MIN_FRAME_INTERVAL_MS: 80
       JPEG_QUALITY: 85
       SCREENCAST_FORMAT: jpeg # how Chromium hands frames to the server: jpeg (default, cheaper) or png (lossless)
-      SCREENCAST_QUALITY: 90  # jpeg capture quality when tiles have to be re-encoded (rotated displays, tile size not a multiple of 16)
+      SCREENCAST_QUALITY: 90  # jpeg capture quality when tiles have to be re-encoded (tile size not a multiple of 16, or a rotated display whose size isn't)
       SCREENCAST_PASSTHROUGH: true # cut changed tiles out of Chromium's JPEG frames instead of compressing them a second time
       MAX_BYTES_PER_MESSAGE: 14336
       WS_PORT: 8081
