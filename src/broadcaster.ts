@@ -12,8 +12,10 @@ export class DeviceBroadcaster {
   addClient(id: string, ws: WebSocket): void {
     const old = this._clients.get(id);
     if (old && old.size) {
+      // terminate(), not close(): close() waits behind the frames still buffered for the old
+      // socket, which keeps that memory and the half-dead connection around.
       for (const sock of old) {
-        try { sock.close(); } catch {}
+        try { sock.terminate(); } catch {}
       }
       old.clear();
     }
@@ -28,8 +30,9 @@ export class DeviceBroadcaster {
     ws.once("error", () => this.removeClient(id, ws));
   }
 
+  // Called by both this class's and the server's close handlers; only the first one counts.
   removeClient(id: string, ws: WebSocket): void {
-    this._clients.get(id)?.delete(ws);
+    if (!this._clients.get(id)?.delete(ws)) return;
     if ((this._clients.get(id)?.size ?? 0) === 0) {
       this._clients.delete(id);
       this._state.delete(id);
@@ -73,10 +76,7 @@ export class DeviceBroadcaster {
     const peers = this._clients.get(id);
     if (!peers || peers.size === 0) return false;
 
-    const packet = buildFrameStatsPacket();
-    const st = this._ensureState(id);
-    st.queue.push({ packets: [packet] });
-    this._drainAsync(id).catch(() => {});
+    this._queueControl(id, buildFrameStatsPacket());
     return true;
   }
 
@@ -84,10 +84,16 @@ export class DeviceBroadcaster {
     const peers = this._clients.get(id);
     if (!peers || peers.size === 0) return;
 
-    const packet = buildCurrentURLPacket(url);
-    const st = this._ensureState(id);
+    this._queueControl(id, buildCurrentURLPacket(url));
+  }
 
-    st.queue.push({ packets: [packet] });
+  // Control packets go ahead of queued frames (a large frame on a slow link would delay
+  // them), but after control packets already waiting, so their order is kept.
+  private _queueControl(id: string, packet: Buffer): void {
+    const st = this._ensureState(id);
+    let i = 0;
+    while (i < st.queue.length && st.queue[i].frameId == null) i++;
+    st.queue.splice(i, 0, { packets: [packet] });
     this._drainAsync(id).catch(() => {});
   }
 
