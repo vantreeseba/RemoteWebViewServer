@@ -25,7 +25,6 @@ export type FrameProcessorCfg = {
   maxBytesPerMessage: number;
 };
 
-type TileInfo = { x: number; y: number; w: number; h: number; changed: boolean };
 type Box = { x: number; y: number; w: number; h: number };
 
 // Split point for oversized rects: a multiple of the JPEG MCU size keeps tiles friendly to HW decoders.
@@ -35,6 +34,17 @@ export class FrameProcessor {
   private _cfg: FrameProcessorCfg;
   private _cols = 0;
   private _rows = 0;
+  // Grid geometry, fixed for a frame size (see _initGrid).
+  private _colX = new Int32Array(0);
+  private _colW = new Int32Array(0);
+  private _rowY = new Int32Array(0);
+  private _rowH = new Int32Array(0);
+  // Largest box a partial frame may merge tiles into: the size of a full-frame part.
+  private _maxBoxW = 0;
+  private _maxBoxH = 0;
+  // Per-tile flags, row-major, reused every frame.
+  private _changed = new Uint8Array(0);
+  private _visited = new Uint8Array(0);
   // Last processed frame. Every tile that differed from its predecessor was sent,
   // so this is exactly what the client shows. Must not be mutated by the caller.
   private _prevFrame?: RGB;
@@ -62,29 +72,16 @@ export class FrameProcessor {
     }
     const chosenEncoding: Encoding = Encoding.JPEG;
 
-    const tiles: TileInfo[] = [];
-    let changedArea = 0;
-
-    for (let ty = 0; ty < this._rows; ty++) {
-      for (let tx = 0; tx < this._cols; tx++) {
-        const x = tx * this._cfg.tileSize;
-        const y = ty * this._cfg.tileSize;
-        const w = Math.min(this._cfg.tileSize, frame.width - x);
-        const h = Math.min(this._cfg.tileSize, frame.height - y);
-
-        const changed = forceFull || this._tileDiffers(frame, prev!, x, y, w, h);
-        tiles.push({ x, y, w, h, changed });
-        if (changed) changedArea += w * h;
-      }
+    let doFull = forceFull;
+    let boxes: Box[] = [];
+    if (!forceFull) {
+      const changedArea = this._markChangedTiles(frame, prev!);
+      const totalArea = frame.width * frame.height;
+      const changedPct = totalArea > 0 ? (changedArea / totalArea) : 0;
+      doFull = changedPct > this._cfg.fullframeAreaThreshold;
+      if (!doFull) boxes = this._mergeChangedTiles();
     }
-
-    const totalArea = frame.width * frame.height;
-    const changedPct = totalArea > 0 ? (changedArea / totalArea) : 0;
-    const doFull = forceFull || (changedPct > this._cfg.fullframeAreaThreshold);
-
-    const boxes = doFull
-      ? this._splitWholeFrame(frame.width, frame.height, this._cfg.fullframeTileCount)
-      : this._mergeChangedTiles(tiles, frame.width, frame.height);
+    if (doFull) boxes = this._splitWholeFrame(frame.width, frame.height, this._cfg.fullframeTileCount);
 
     // Encode in parallel: sharp runs each encode on the libuv thread pool.
     const parts = await Promise.all(boxes.map(b => this._encodeFittingAsync(frame, b, chosenEncoding)));
@@ -95,19 +92,42 @@ export class FrameProcessor {
     return { rects, isFullFrame: doFull, encoding: chosenEncoding };
   }
 
-  private _tileDiffers(cur: RGB, prev: RGB, x: number, y: number, w: number, h: number): boolean {
-    const rowBytes = w * BPP;
-    for (let yy = 0; yy < h; yy++) {
-      const off = ((y + yy) * cur.width + x) * BPP;
-      if (cur.data.compare(prev.data, off, off + rowBytes, off, off + rowBytes) !== 0) return true;
+  // Sets _changed for every tile that differs from the previous frame; returns the changed area.
+  // Compares whole pixel rows first: on a mostly static page nearly all rows are equal, so
+  // that is one compare per row instead of one per tile row.
+  private _markChangedTiles(cur: RGB, prev: RGB): number {
+    const cols = this._cols, changed = this._changed;
+    const stride = cur.width * BPP;
+    const a = cur.data, b = prev.data;
+    changed.fill(0);
+    let changedArea = 0;
+
+    for (let r = 0; r < this._rows; r++) {
+      const base = r * cols;
+      let pending = cols; // tiles in this band not known to have changed yet
+      const y1 = this._rowY[r] + this._rowH[r];
+      for (let y = this._rowY[r]; y < y1 && pending > 0; y++) {
+        const row = y * stride;
+        if (a.compare(b, row, row + stride, row, row + stride) === 0) continue;
+        for (let c = 0; c < cols; c++) {
+          if (changed[base + c]) continue;
+          const off = row + this._colX[c] * BPP;
+          const end = off + this._colW[c] * BPP;
+          if (a.compare(b, off, end, off, end) !== 0) {
+            changed[base + c] = 1;
+            changedArea += this._colW[c] * this._rowH[r];
+            pending--;
+          }
+        }
+      }
     }
-    return false;
+    return changedArea;
   }
 
   // Encodes a box, splitting it in halves until every piece fits into one message.
   private async _encodeFittingAsync(frame: RGB, b: Box, enc: Encoding): Promise<Rect[]> {
     const maxBytesPerTile = this._cfg.maxBytesPerMessage - FRAME_HEADER_BYTES - TILE_HEADER_BYTES;
-    const data = await this._encode(this._extractRaw(frame, b.x, b.y, b.w, b.h), b.w, b.h, enc);
+    const data = await this._encodeBox(frame, b, enc);
     if (data.length <= maxBytesPerTile) return [{ ...b, data }];
 
     const halves = this._splitBox(b);
@@ -173,93 +193,48 @@ export class FrameProcessor {
     return rects;
   }
 
-  private _getMaxFullTileSize(frameW: number, frameH: number): { maxW: number; maxH: number } {
-    const fullRects = this._splitWholeFrame(frameW, frameH, this._cfg.fullframeTileCount);
-    let maxW = 0, maxH = 0;
-    for (const r of fullRects) {
-      if (r.w > maxW) maxW = r.w;
-      if (r.h > maxH) maxH = r.h;
-    }
-    return { maxW, maxH };
-  }
-
-  private _calcGridSplits(frameW: number, frameH: number) {
-    const cols = this._cols, rows = this._rows, ts = this._cfg.tileSize;
-    const widths: number[] = new Array(cols);
-    const heights: number[] = new Array(rows);
-    const xOffsets: number[] = new Array(cols);
-    const yOffsets: number[] = new Array(rows);
-
-    let x = 0;
-    for (let c = 0; c < cols; c++) {
-      const w = Math.min(ts, frameW - x);
-      widths[c] = w;
-      xOffsets[c] = x;
-      x += w;
-    }
-    let y = 0;
-    for (let r = 0; r < rows; r++) {
-      const h = Math.min(ts, frameH - y);
-      heights[r] = h;
-      yOffsets[r] = y;
-      y += h;
-    }
-    return { widths, heights, xOffsets, yOffsets };
-  }
-
-  private _mergeChangedTiles(
-    tiles: TileInfo[],
-    frameW: number,
-    frameH: number
-  ): Box[] {
+  // Merges changed tiles into rectangles no larger than a full-frame part.
+  private _mergeChangedTiles(): Box[] {
     const cols = this._cols, rows = this._rows;
-    const changed: boolean[][] = Array.from({ length: rows }, () => Array<boolean>(cols).fill(false));
-    const visited: boolean[][] = Array.from({ length: rows }, () => Array<boolean>(cols).fill(false));
+    const changed = this._changed, visited = this._visited;
+    const maxW = this._maxBoxW, maxH = this._maxBoxH;
+    visited.fill(0);
 
-    for (let i = 0; i < tiles.length; i++) {
-      const ty = Math.floor(i / cols);
-      const tx = i % cols;
-      changed[ty][tx] = tiles[i].changed;
-    }
-
-    const { widths, heights, xOffsets, yOffsets } = this._calcGridSplits(frameW, frameH);
-    const { maxW, maxH } = this._getMaxFullTileSize(frameW, frameH);
-
-    const rects: { x: number; y: number; w: number; h: number }[] = [];
+    const rects: Box[] = [];
 
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        if (!changed[r][c] || visited[r][c]) continue;
+        const i = r * cols + c;
+        if (!changed[i] || visited[i]) continue;
 
         // grow horizontally
         let wTiles = 0, pxW = 0;
-        while (c + wTiles < cols && changed[r][c + wTiles] && !visited[r][c + wTiles]) {
-          const nextW = pxW + widths[c + wTiles];
+        while (c + wTiles < cols && changed[i + wTiles] && !visited[i + wTiles]) {
+          const nextW = pxW + this._colW[c + wTiles];
           if (nextW > maxW) break;
           pxW = nextW;
           wTiles++;
         }
 
         // grow vertically
-        let hTiles = 1, pxH = heights[r];
-        let canGrow = true;
-        while (canGrow && (r + hTiles) < rows) {
-          const nextH = pxH + heights[r + hTiles];
+        let hTiles = 1, pxH = this._rowH[r];
+        while (r + hTiles < rows) {
+          const nextH = pxH + this._rowH[r + hTiles];
           if (nextH > maxH) break;
+          const rowBase = (r + hTiles) * cols;
+          let all = true;
           for (let cc = c; cc < c + wTiles; cc++) {
-            if (!changed[r + hTiles][cc] || visited[r + hTiles][cc]) { canGrow = false; break; }
+            if (!changed[rowBase + cc] || visited[rowBase + cc]) { all = false; break; }
           }
-          if (!canGrow) break;
+          if (!all) break;
           pxH = nextH;
           hTiles++;
         }
 
-        rects.push({ x: xOffsets[c], y: yOffsets[r], w: pxW, h: pxH });
+        rects.push({ x: this._colX[c], y: this._rowY[r], w: pxW, h: pxH });
 
         for (let rr = r; rr < r + hTiles; rr++) {
-          for (let cc = c; cc < c + wTiles; cc++) {
-            visited[rr][cc] = true;
-          }
+          visited.fill(1, rr * cols + c, rr * cols + c + wTiles);
         }
       }
     }
@@ -268,8 +243,30 @@ export class FrameProcessor {
   }
 
   private _initGrid(w: number, h: number) {
-    this._cols = Math.ceil(w / this._cfg.tileSize);
-    this._rows = Math.ceil(h / this._cfg.tileSize);
+    const ts = this._cfg.tileSize;
+    const cols = this._cols = Math.ceil(w / ts);
+    const rows = this._rows = Math.ceil(h / ts);
+    this._colX = new Int32Array(cols);
+    this._colW = new Int32Array(cols);
+    this._rowY = new Int32Array(rows);
+    this._rowH = new Int32Array(rows);
+    for (let c = 0; c < cols; c++) {
+      this._colX[c] = c * ts;
+      this._colW[c] = Math.min(ts, w - c * ts);
+    }
+    for (let r = 0; r < rows; r++) {
+      this._rowY[r] = r * ts;
+      this._rowH[r] = Math.min(ts, h - r * ts);
+    }
+    this._changed = new Uint8Array(cols * rows);
+    this._visited = new Uint8Array(cols * rows);
+
+    this._maxBoxW = 0;
+    this._maxBoxH = 0;
+    for (const r of this._splitWholeFrame(w, h, this._cfg.fullframeTileCount)) {
+      this._maxBoxW = Math.max(this._maxBoxW, r.w);
+      this._maxBoxH = Math.max(this._maxBoxH, r.h);
+    }
   }
 
   private _extractRaw(frame: RGB, x: number, y: number, w: number, h: number): Buffer {
@@ -279,6 +276,19 @@ export class FrameProcessor {
       frame.data.copy(out, yy * w * BPP, src, src + w * BPP);
     }
     return out;
+  }
+
+  // Encodes one box of the frame. For JPEG, sharp crops the shared frame buffer itself,
+  // so the box isn't copied out first.
+  private async _encodeBox(frame: RGB, b: Box, enc: Encoding): Promise<Buffer> {
+    if (enc !== Encoding.JPEG && enc !== Encoding.UNKNOWN)
+      return this._encode(this._extractRaw(frame, b.x, b.y, b.w, b.h), b.w, b.h, enc);
+    const img = sharp(frame.data, { raw: { width: frame.width, height: frame.height, channels: BPP } });
+    if (b.x !== 0 || b.y !== 0 || b.w !== frame.width || b.h !== frame.height)
+      img.extract({ left: b.x, top: b.y, width: b.w, height: b.h });
+    return img
+      .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:2:0" })
+      .toBuffer();
   }
 
   private async _encode(rawRgb: Buffer, w: number, h: number, enc: Encoding): Promise<Buffer> {

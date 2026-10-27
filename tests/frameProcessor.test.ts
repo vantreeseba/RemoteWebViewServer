@@ -79,6 +79,22 @@ describe("FrameProcessor", () => {
     expect((await fp.processFrameAsync(base)).rects).toHaveLength(1);
   });
 
+  it("finds single-pixel changes in partial edge tiles and merges neighbours", async () => {
+    const fp = new FrameProcessor(DEFAULT_CFG);
+    const base = solidFrame(333, 201, [50, 50, 50]);
+    await fp.processFrameAsync(base);
+
+    // Bottom-right tile is 13x9 px (333 = 10*32+13, 201 = 6*32+9).
+    const corner = await fp.processFrameAsync(paint(base, 332, 200, 1, 1, [51, 50, 50]));
+    expect(corner.isFullFrame).toBe(false);
+    expect(corner.rects.map(r => [r.x, r.y, r.w, r.h])).toEqual([[320, 192, 13, 9]]);
+
+    // Two horizontally adjacent tiles changing in different pixel rows become one rect.
+    const prev = paint(base, 332, 200, 1, 1, [51, 50, 50]);
+    const pair = await fp.processFrameAsync(paint(paint(prev, 40, 33, 1, 1, [0, 0, 0]), 70, 60, 1, 1, [0, 0, 0]));
+    expect(pair.rects.map(r => [r.x, r.y, r.w, r.h])).toEqual([[32, 32, 64, 32]]);
+  });
+
   it("sends a full frame when requested", async () => {
     const fp = new FrameProcessor(DEFAULT_CFG);
     const base = solidFrame(320, 240, [1, 2, 3]);
