@@ -4,6 +4,7 @@ let cachedUrl: string | undefined;
 let cachedScript: string | undefined;
 let failedUrl: string | undefined;
 let failedAt = 0;
+let inFlight: { url: string; promise: Promise<string | undefined> } | undefined;
 
 // A failing URL is retried at most this often; without it a slow/unreachable
 // INJECT_JS_URL blocks every device (re)connect for the full fetch timeout.
@@ -35,6 +36,16 @@ export async function getInjectScriptFromUrl(cfg: InjectScriptConfig): Promise<s
     return undefined;
   }
 
+  // The startup warm-up and the first device connect can ask at the same time.
+  if (inFlight?.url === cfg.url) return inFlight.promise;
+  const url = cfg.url;
+  const promise = _fetchScriptAsync({ url, allowHttp: cfg.allowHttp })
+    .finally(() => { if (inFlight?.promise === promise) inFlight = undefined; });
+  inFlight = { url, promise };
+  return promise;
+}
+
+async function _fetchScriptAsync(cfg: { url: string; allowHttp: boolean }): Promise<string | undefined> {
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(cfg.url);

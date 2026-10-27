@@ -183,27 +183,26 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
     });
     session = (root as any).session(sessionId);
 
-    await session.send('Page.enable');
-    await session.send('Emulation.setDeviceMetricsOverride', {
-      width: viewport.width,
-      height: viewport.height,
-      deviceScaleFactor: cfg.scale,
-      mobile: true
-    });
-    if (PREFERS_REDUCED_MOTION) {
-      await session.send('Emulation.setEmulatedMedia', {
+    // Independent commands: one round trip instead of one each. CDP handles a session's
+    // commands in order, so the screencast below still starts with the final metrics.
+    const s = session;
+    await Promise.all([
+      s.send('Page.enable'),
+      s.send('Emulation.setDeviceMetricsOverride', {
+        width: viewport.width,
+        height: viewport.height,
+        deviceScaleFactor: cfg.scale,
+        mobile: true
+      }),
+      PREFERS_REDUCED_MOTION && s.send('Emulation.setEmulatedMedia', {
         media: 'screen',
         features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
-      });
-    }
-
-    const keyboardScript = await getInjectScriptFromUrl(readInjectScriptConfig());
-    if (keyboardScript) {
-      await session.send('Page.addScriptToEvaluateOnNewDocument', { source: keyboardScript });
-    }
-
-    // Needed for Inspector.targetCrashed.
-    await session.send('Inspector.enable').catch(() => { });
+      }),
+      // Needed for Inspector.targetCrashed.
+      s.send('Inspector.enable').catch(() => { }),
+      getInjectScriptFromUrl(readInjectScriptConfig()).then(script =>
+        script && s.send('Page.addScriptToEvaluateOnNewDocument', { source: script })),
+    ]);
 
     await startScreencastAsync(session, cfg);
   } catch (e) {

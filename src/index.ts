@@ -1,7 +1,8 @@
 import http from 'http';
 import { WebSocketServer } from "ws"
 import env from "env-var";
-import { makeConfigFromParams, logDeviceConfig, DeviceConfig } from "./config.js";
+import { makeConfigFromParams, logDeviceConfig, DeviceConfig, readInjectScriptConfig } from "./config.js";
+import { getInjectScriptFromUrl } from "./scriptLoader.js";
 import { broadcaster, ensureDeviceAsync, releaseDeviceAsync, getDevice, cleanupIdleAsync, DeviceSession } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
@@ -31,6 +32,10 @@ setInterval(() => {
     try { ws.ping(); } catch { }
   }
 }, HEARTBEAT_INTERVAL_MS);
+
+// Fetch the inject script while the browser starts, so the first connect doesn't wait for it.
+const injectCfg = readInjectScriptConfig();
+if (injectCfg.url) getInjectScriptFromUrl(injectCfg).catch(() => { });
 
 await bootstrapAsync();
 
