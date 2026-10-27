@@ -2,7 +2,8 @@ import { CDPSession } from "playwright-core";
 import sharp from "sharp";
 import { DeviceConfig, deviceConfigsEqual, readInjectScriptConfig, readScreencastConfig } from "./config.js";
 import { getRoot } from "./cdpRoot.js";
-import { FrameProcessor } from "./frameProcessor.js";
+import { FrameProcessor, JpegFrame, RGB } from "./frameProcessor.js";
+import { decodeJpegBlocks } from "./jpegBlocks.js";
 import { DeviceBroadcaster } from "./broadcaster.js";
 import { SelfTestRunner } from "./selfTest.js";
 import { getInjectScriptFromUrl } from "./scriptLoader.js";
@@ -48,6 +49,8 @@ export type DeviceSession = {
   stats: PipelineStats;
   // frames came smaller than the device and had to be upscaled; logged once
   scaleWarned?: boolean;
+  // frames couldn't be cropped as JPEG blocks; logged once
+  passthroughWarned?: boolean;
   // replaces cfg.minFrameInterval while set (the self-test sends one frame at a time)
   minFrameIntervalOverride?: number;
   // frameAtMs: when the browser delivered the frame; sentAtMs: when it was handed to the socket
@@ -123,14 +126,62 @@ async function _stopScreencastIfUnusedAsync(id: string): Promise<void> {
 
 const SCREENCAST = readScreencastConfig();
 
+// Whether changed tiles are cut out of Chrome's JPEG frames instead of being decoded and
+// compressed again. Rotation needs the pixels; the tile grid must fall on JPEG's 16 px MCUs.
+function usesPassthrough(cfg: DeviceConfig): boolean {
+  return SCREENCAST.format === 'jpeg' && SCREENCAST.passthrough &&
+    cfg.rotation === 0 && cfg.tileSize % 16 === 0;
+}
+
 function startScreencastAsync(session: { send(method: any, params?: any): Promise<any> }, cfg: DeviceConfig) {
   return session.send('Page.startScreencast', {
     format: SCREENCAST.format,
-    ...(SCREENCAST.format === 'jpeg' ? { quality: SCREENCAST.quality } : {}),
+    // With passthrough, Chrome's encode is what the device gets, so it uses the device's quality.
+    ...(SCREENCAST.format === 'jpeg'
+      ? { quality: usesPassthrough(cfg) ? cfg.jpegQuality : SCREENCAST.quality }
+      : {}),
     maxWidth: cfg.width,
     maxHeight: cfg.height,
     everyNthFrame: cfg.everyNthFrame
   });
+}
+
+// Turns a screencast frame into what the frame processor diffs: DCT blocks when tiles can be
+// cut out of Chrome's JPEG as is, otherwise RGB pixels (rescaled and rotated as needed).
+async function decodeFrameAsync(dev: DeviceSession, encoded: Buffer): Promise<RGB | JpegFrame> {
+  const cfg = dev.cfg, id = dev.deviceId;
+  const size = imageSize(encoded);
+  const sizeOk = !!size && size.width === cfg.width && size.height === cfg.height;
+  if (sizeOk && usesPassthrough(cfg)) {
+    const blocks = decodeJpegBlocks(encoded);
+    if (blocks && dev.processor.acceptsJpegBlocks(blocks))
+      return { width: blocks.width, height: blocks.height, jpeg: encoded, blocks };
+    if (!dev.passthroughWarned) {
+      dev.passthroughWarned = true;
+      console.warn(`[device] ${id}: can't cut tiles out of the screencast JPEG directly, re-encoding them`);
+    }
+  }
+
+  let img = sharp(encoded);
+  if (size && !sizeOk) {
+    // Chrome renders at most at the browser's device scale factor (MAX_DEVICE_SCALE_FACTOR),
+    // and a fractional scale can be a pixel off; stretch the frame to the device size.
+    if (!dev.scaleWarned && size.width < cfg.width) {
+      dev.scaleWarned = true;
+      console.warn(`[device] ${id}: frames are ${size.width}x${size.height} instead of ` +
+        `${cfg.width}x${cfg.height}, upscaling; set MAX_DEVICE_SCALE_FACTOR >= ${cfg.scale} for sharp output`);
+    }
+    const { data, info } = await img.removeAlpha().resize(cfg.width, cfg.height, { fit: 'fill' })
+      .raw().toBuffer({ resolveWithObject: true });
+    img = sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
+  }
+  if (dev.cfg.rotation) img = img.rotate(dev.cfg.rotation);
+
+  const { data, info } = await img
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  return { data, width: info.width, height: info.height };
 }
 
 async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
@@ -292,27 +343,7 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
       dev.processedB64 = b64;
       const encoded = Buffer.from(b64, 'base64');
 
-      let img = sharp(encoded);
-      const size = imageSize(encoded);
-      if (size && (size.width !== cfg.width || size.height !== cfg.height)) {
-        // Chrome renders at most at the browser's device scale factor (MAX_DEVICE_SCALE_FACTOR),
-        // and a fractional scale can be a pixel off; stretch the frame to the device size.
-        if (!dev.scaleWarned && size.width < cfg.width) {
-          dev.scaleWarned = true;
-          console.warn(`[device] ${id}: frames are ${size.width}x${size.height} instead of ` +
-            `${cfg.width}x${cfg.height}, upscaling; set MAX_DEVICE_SCALE_FACTOR >= ${cfg.scale} for sharp output`);
-        }
-        const { data, info } = await img.removeAlpha().resize(cfg.width, cfg.height, { fit: 'fill' })
-          .raw().toBuffer({ resolveWithObject: true });
-        img = sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
-      }
-      if (dev.cfg.rotation) img = img.rotate(dev.cfg.rotation);
-
-      const { data, info } = await img
-        .removeAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-      const out = await processor.processFrameAsync({ data, width: info.width, height: info.height });
+      const out = await processor.processFrameAsync(await decodeFrameAsync(dev, encoded));
       if (out.rects.length > 0 && isCurrent()) {
         dev.frameId = (dev.frameId + 1) >>> 0;
         const procMs = performance.now() - t0;

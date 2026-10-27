@@ -75,6 +75,16 @@ quality 95/100 removes them but costs Chromium CPU and drops to 9–11 fps.
   parallel; the inject script is fetched at startup, with in-flight sharing.
 - [x] **30. Chromium disk cache capped at 100 MB** (`c0df918`).
 
+- [x] **38. Changed tiles were compressed twice with JPEG capture** (new):
+  `src/jpegBlocks.ts` decodes Chrome's JPEG to DCT coefficients only, the
+  processor diffs tiles on those and cuts changed tiles out losslessly
+  (`jpegtran -crop` style), with Chrome encoding at the device's quality.
+  Falls back to the pixel path for rotation, rescaled frames, tile sizes
+  that aren't a multiple of 16, and unsupported JPEGs; `SCREENCAST_PASSTHROUGH=false`
+  turns it off. Measured against the re-encode path (4 paired runs, noisy
+  machine): server CPU ~20% lower, server RSS 25–45 MB lower, bytes per frame
+  back to the PNG-capture level. Not yet tried on real ESP32 hardware.
+
 ## Measured, not worth changing
 
 - `sharp.cache(false)`: the operation cache holds ~1 MB here; no CPU or RSS

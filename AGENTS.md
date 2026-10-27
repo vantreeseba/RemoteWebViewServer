@@ -34,6 +34,7 @@ RemoteWebViewServer/
 │   ├── cdpRoot.ts         # Minimal raw CDP client (root connection + flattened sessions)
 │   ├── deviceManager.ts   # DeviceSession lifecycle: create target, screencast, throttle, idle cleanup
 │   ├── frameProcessor.ts  # Tile grid diffing, full/partial frame decision, JPEG encoding
+│   ├── jpegBlocks.ts      # JPEG ↔ DCT coefficients: lossless tile crops of screencast frames
 │   ├── broadcaster.ts     # Per-device client sets, ordered frame queue, chunked send
 │   ├── frameAckWindow.ts  # Window of sent-but-unacknowledged frames for clients that send FrameAck
 │   ├── pipelineStats.ts   # Per-device pipeline counters (used by the self-test)
@@ -67,8 +68,12 @@ RemoteWebViewServer/
   dropped (`_releaseScreencastAcks`; acked at once when nobody is connected) → trailing
   throttle by `minFrameInterval` → wait while the client's socket is congested
   or its `FrameAck` window is full → skip frames identical to the last
-  processed one → sharp resize-to-device (page scale) + rotate + raw RGB →
-  `FrameProcessor` tile diff → JPEG tiles → `broadcaster` chunked send
+  processed one → either (JPEG, no rotation, tile size a multiple of 16,
+  frame already device-sized) decode to DCT coefficients only
+  (`src/jpegBlocks.ts`), diff tiles on those and cut changed tiles out
+  losslessly, with Chrome encoding at the device's `jpegQuality`; or sharp
+  resize-to-device (page scale) + rotate + raw RGB → `FrameProcessor` tile
+  diff → JPEG tiles. Then → `broadcaster` chunked send
   respecting `maxBytesPerMessage`.
 - **Full-frame triggers**: every `fullFrameEvery` frames, when changed area
   exceeds `fullFrameAreaThreshold`, or on demand (reconnect/reconfigure, or a

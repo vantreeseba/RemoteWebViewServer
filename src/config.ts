@@ -19,6 +19,7 @@ export type DeviceConfig = {
 export type ScreencastConfig = {
   format: 'jpeg' | 'png';
   quality: number; // jpeg only, 1..100
+  passthrough: boolean; // cut tiles out of the JPEG frames instead of re-encoding them
 };
 
 export type InjectScriptConfig = {
@@ -191,12 +192,16 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
 // dashboards, which makes Chrome's encode, the base64 on the CDP socket and the decode here
 // cheaper. Chrome's encoder is deterministic, so identical frames are still skipped, and JPEG
 // artifacts stay inside their 8x8 blocks, so unchanged tiles still compare equal.
-// SCREENCAST_FORMAT=png avoids compressing changed tiles twice.
+// With SCREENCAST_PASSTHROUGH (default on) changed tiles are cut out of Chrome's JPEG
+// without compressing them again, and Chrome encodes at the device's JPEG quality;
+// SCREENCAST_QUALITY then only applies to devices that can't use it (rotated displays,
+// tile sizes that aren't a multiple of 16).
 export function readScreencastConfig(): ScreencastConfig {
   const format = env.get("SCREENCAST_FORMAT").default("jpeg").asEnum(["jpeg", "png"]);
   const quality = env.get("SCREENCAST_QUALITY").default("90").asIntPositive();
   if (quality > 100) throw new Error(`invalid SCREENCAST_QUALITY (1..100): "${quality}"`);
-  return { format, quality };
+  const passthrough = env.get("SCREENCAST_PASSTHROUGH").default("true").asBool();
+  return { format, quality, passthrough };
 }
 
 export function readInjectScriptConfig(): InjectScriptConfig {

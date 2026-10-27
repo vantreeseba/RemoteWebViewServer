@@ -1,5 +1,6 @@
 import sharp from "sharp";
 import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "./protocol.js";
+import { JpegBlocks, encodeJpegBlocks } from "./jpegBlocks.js";
 
 // One libvips thread per image: the boxes of a frame are already encoded in parallel on the
 // libuv thread pool, and splitting each small box across more threads costs more than it
@@ -10,6 +11,14 @@ sharp.concurrency(1);
 // Packed RGB, no alpha: 25% less to decode, compare and encode than RGB.
 export type RGB = { data: Buffer; width: number; height: number };
 export const BPP = 3; // bytes per pixel
+
+// A frame that is already JPEG, decoded only to DCT coefficients (see jpegBlocks.ts).
+// Changed tiles are cut out of it without being compressed again.
+export type JpegFrame = { width: number; height: number; jpeg: Buffer; blocks: JpegBlocks };
+
+function isJpegFrame(f: RGB | JpegFrame): f is JpegFrame {
+  return (f as JpegFrame).blocks !== undefined;
+}
 
 export type Rect = { x: number; y: number; w: number; h: number; data: Buffer };
 
@@ -50,7 +59,7 @@ export class FrameProcessor {
   private _visited = new Uint8Array(0);
   // Last processed frame. Every tile that differed from its predecessor was sent,
   // so this is exactly what the client shows. Must not be mutated by the caller.
-  private _prevFrame?: RGB;
+  private _prevFrame?: RGB | JpegFrame;
   private _iter = 0;
   private _fullFrameRequested = false;
 
@@ -63,12 +72,24 @@ export class FrameProcessor {
     this._fullFrameRequested = true;
   }
 
-  public async processFrameAsync(frame: RGB): Promise<FrameOut> {
+  // True if tiles can be cut out of this JPEG frame directly: the tile grid has to fall on
+  // the JPEG's MCU grid.
+  public acceptsJpegBlocks(b: JpegBlocks): boolean {
+    const ts = this._cfg.tileSize;
+    return ts % b.mcuW === 0 && ts % b.mcuH === 0;
+  }
+
+  public async processFrameAsync(frame: RGB | JpegFrame): Promise<FrameOut> {
     const prev = this._prevFrame;
     const sizeChanged = !prev || prev.width !== frame.width || prev.height !== frame.height;
     if (sizeChanged) this._initGrid(frame.width, frame.height);
+    // Frames of different kinds can't be compared; switching kinds (e.g. a frame that had
+    // to be rescaled) sends a full frame.
+    const kindChanged = !!prev && isJpegFrame(prev) !== isJpegFrame(frame);
+    if (isJpegFrame(frame) && !this.acceptsJpegBlocks(frame.blocks))
+      throw new Error("tile grid doesn't match the JPEG's MCU grid");
 
-    let forceFull = sizeChanged || (this._iter % this._cfg.fullFrameEvery) === 0;
+    let forceFull = sizeChanged || kindChanged || (this._iter % this._cfg.fullFrameEvery) === 0;
     if (this._fullFrameRequested) {
       forceFull = true;
       this._fullFrameRequested = false;
@@ -78,7 +99,9 @@ export class FrameProcessor {
     let doFull = forceFull;
     let boxes: Box[] = [];
     if (!forceFull) {
-      const changedArea = this._markChangedTiles(frame, prev!);
+      const changedArea = isJpegFrame(frame)
+        ? this._markChangedBlocks(frame.blocks, (prev as JpegFrame).blocks)
+        : this._markChangedTiles(frame, prev as RGB);
       const totalArea = frame.width * frame.height;
       const changedPct = totalArea > 0 ? (changedArea / totalArea) : 0;
       doFull = changedPct > this._cfg.fullframeAreaThreshold;
@@ -127,8 +150,42 @@ export class FrameProcessor {
     return changedArea;
   }
 
+  // Same as _markChangedTiles, on quantized DCT coefficients: equal pixels give equal
+  // coefficients. Whole MCU rows are compared first.
+  private _markChangedBlocks(cur: JpegBlocks, prev: JpegBlocks): number {
+    const cols = this._cols, changed = this._changed;
+    const mcuBytes = cur.blocksPerMcu * 64 * 2;
+    const rowBytes = cur.mcusX * mcuBytes;
+    const a = Buffer.from(cur.coef.buffer, cur.coef.byteOffset, cur.coef.byteLength);
+    const b = Buffer.from(prev.coef.buffer, prev.coef.byteOffset, prev.coef.byteLength);
+    changed.fill(0);
+    let changedArea = 0;
+
+    for (let r = 0; r < this._rows; r++) {
+      const base = r * cols;
+      let pending = cols;
+      const my0 = this._rowY[r] / cur.mcuH;
+      const my1 = Math.ceil((this._rowY[r] + this._rowH[r]) / cur.mcuH);
+      for (let my = my0; my < my1 && pending > 0; my++) {
+        const row = my * rowBytes;
+        if (a.compare(b, row, row + rowBytes, row, row + rowBytes) === 0) continue;
+        for (let c = 0; c < cols; c++) {
+          if (changed[base + c]) continue;
+          const off = row + (this._colX[c] / cur.mcuW) * mcuBytes;
+          const end = row + Math.ceil((this._colX[c] + this._colW[c]) / cur.mcuW) * mcuBytes;
+          if (a.compare(b, off, end, off, end) !== 0) {
+            changed[base + c] = 1;
+            changedArea += this._colW[c] * this._rowH[r];
+            pending--;
+          }
+        }
+      }
+    }
+    return changedArea;
+  }
+
   // Encodes a box, splitting it in halves until every piece fits into one message.
-  private async _encodeFittingAsync(frame: RGB, b: Box, enc: Encoding): Promise<Rect[]> {
+  private async _encodeFittingAsync(frame: RGB | JpegFrame, b: Box, enc: Encoding): Promise<Rect[]> {
     const maxBytesPerTile = this._cfg.maxBytesPerMessage - FRAME_HEADER_BYTES - TILE_HEADER_BYTES;
     const data = await this._encodeBox(frame, b, enc);
     if (data.length <= maxBytesPerTile) return [{ ...b, data }];
@@ -283,13 +340,30 @@ export class FrameProcessor {
 
   // Encodes one box of the frame. For JPEG, sharp crops the shared frame buffer itself,
   // so the box isn't copied out first.
-  private async _encodeBox(frame: RGB, b: Box, enc: Encoding): Promise<Buffer> {
+  private async _encodeBox(frame: RGB | JpegFrame, b: Box, enc: Encoding): Promise<Buffer> {
+    if (isJpegFrame(frame)) return this._cropJpegAsync(frame, b);
     if (enc !== Encoding.JPEG && enc !== Encoding.UNKNOWN)
       return this._encode(this._extractRaw(frame, b.x, b.y, b.w, b.h), b.w, b.h, enc);
     const img = sharp(frame.data, { raw: { width: frame.width, height: frame.height, channels: BPP } });
     if (b.x !== 0 || b.y !== 0 || b.w !== frame.width || b.h !== frame.height)
       img.extract({ left: b.x, top: b.y, width: b.w, height: b.h });
     return img
+      .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:2:0" })
+      .toBuffer();
+  }
+
+  // Cuts a box out of an already-JPEG frame without compressing it again. A box off the
+  // MCU grid (only from splitting a box smaller than two MCUs) is re-encoded instead.
+  private async _cropJpegAsync(frame: JpegFrame, b: Box): Promise<Buffer> {
+    const j = frame.blocks;
+    const alignedX = b.x % j.mcuW === 0 && (b.w % j.mcuW === 0 || b.x + b.w === frame.width);
+    const alignedY = b.y % j.mcuH === 0 && (b.h % j.mcuH === 0 || b.y + b.h === frame.height);
+    if (alignedX && alignedY) {
+      return encodeJpegBlocks(j, b.x / j.mcuW, b.y / j.mcuH,
+        Math.ceil(b.w / j.mcuW), Math.ceil(b.h / j.mcuH), b.w, b.h);
+    }
+    return sharp(frame.jpeg)
+      .extract({ left: b.x, top: b.y, width: b.w, height: b.h })
       .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:2:0" })
       .toBuffer();
   }

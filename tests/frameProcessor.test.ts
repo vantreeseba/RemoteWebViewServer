@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import sharp from "sharp";
-import { FrameProcessor, FrameProcessorCfg, RGB, BPP } from "../src/frameProcessor.js";
+import { FrameProcessor, FrameProcessorCfg, RGB, BPP, JpegFrame } from "../src/frameProcessor.js";
+import { decodeJpegBlocks } from "../src/jpegBlocks.js";
 import { buildFramePackets, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "../src/protocol.js";
 
 const DEFAULT_CFG: FrameProcessorCfg = {
@@ -161,5 +162,68 @@ describe("FrameProcessor", () => {
     const rects = await fullFrameRects(20, 10, 4);
     expect(rects.every(r => r.w > 0 && r.h > 0)).toBe(true);
     expect(area(rects)).toBe(20 * 10);
+  });
+
+  describe("JPEG frames (tiles cut out without re-encoding)", () => {
+    async function jpegFrame(frame: RGB): Promise<JpegFrame> {
+      const jpeg = await sharp(frame.data, { raw: { width: frame.width, height: frame.height, channels: BPP } })
+        .jpeg({ quality: 85, chromaSubsampling: "4:2:0" }).toBuffer();
+      return { width: frame.width, height: frame.height, jpeg, blocks: decodeJpegBlocks(jpeg)! };
+    }
+
+    it("finds the same changed tiles as the pixel path and sends Chrome's blocks unchanged", async () => {
+      const base = noiseFrame(320, 240, 3);
+      const next = paint(base, 100, 70, 20, 10, [255, 0, 0]);
+      const fpPix = new FrameProcessor(DEFAULT_CFG), fpJpg = new FrameProcessor(DEFAULT_CFG);
+      await fpPix.processFrameAsync(base);
+      const first = await fpJpg.processFrameAsync(await jpegFrame(base));
+      expect(first.isFullFrame).toBe(true);
+      expect(area(first.rects)).toBe(320 * 240);
+
+      const j = await jpegFrame(next);
+      const pix = await fpPix.processFrameAsync(next);
+      const jpg = await fpJpg.processFrameAsync(j);
+      const boxes = (o: { rects: { x: number; y: number; w: number; h: number }[] }) => o.rects.map(r => [r.x, r.y, r.w, r.h]);
+      expect(boxes(jpg)).toEqual(boxes(pix));
+      expect(boxes(jpg)).toEqual([[96, 64, 32, 32]]);
+
+      // The tile carries the frame's own coefficients for those MCUs.
+      const tile = decodeJpegBlocks(jpg.rects[0].data)!;
+      const n = j.blocks.blocksPerMcu * 64;
+      for (let my = 0; my < 2; my++) {
+        const src = j.blocks.coef.subarray(((4 + my) * j.blocks.mcusX + 6) * n, ((4 + my) * j.blocks.mcusX + 8) * n);
+        expect(tile.coef.subarray(my * 2 * n, (my + 1) * 2 * n)).toEqual(src);
+      }
+
+      expect((await fpJpg.processFrameAsync(await jpegFrame(next))).rects).toHaveLength(0);
+    });
+
+    it("sends a full frame when switching between pixel and JPEG frames", async () => {
+      const fp = new FrameProcessor(DEFAULT_CFG);
+      const f = solidFrame(320, 240, [1, 2, 3]);
+      await fp.processFrameAsync(await jpegFrame(f));
+      expect((await fp.processFrameAsync(f)).isFullFrame).toBe(true);
+      expect((await fp.processFrameAsync(await jpegFrame(f))).isFullFrame).toBe(true);
+    });
+
+    it("splits oversized boxes on the MCU grid", async () => {
+      const fp = new FrameProcessor({ ...DEFAULT_CFG, maxBytesPerMessage: 3000 });
+      const out = await fp.processFrameAsync(await jpegFrame(noiseFrame(320, 240, 9)));
+      expect(area(out.rects)).toBe(320 * 240);
+      for (const r of out.rects) {
+        expect(r.data.length).toBeLessThanOrEqual(3000 - FRAME_HEADER_BYTES - TILE_HEADER_BYTES);
+        expect(r.x % 16).toBe(0);
+        expect(r.y % 16).toBe(0);
+        const back = decodeJpegBlocks(r.data)!;
+        expect([back.width, back.height]).toEqual([r.w, r.h]);
+      }
+    });
+
+    it("rejects a tile grid that doesn't fall on the MCU grid", async () => {
+      const fp = new FrameProcessor({ ...DEFAULT_CFG, tileSize: 24 });
+      const j = await jpegFrame(solidFrame(96, 96, [0, 0, 0]));
+      expect(fp.acceptsJpegBlocks(j.blocks)).toBe(false);
+      await expect(fp.processFrameAsync(j)).rejects.toThrow();
+    });
   });
 });
