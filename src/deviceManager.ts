@@ -34,6 +34,9 @@ export type DeviceSession = {
   // last processed screencast frame, to skip identical ones
   processedB64?: string;
 
+  // Screencast frames not acknowledged to Chrome yet (see _releaseScreencastAcks)
+  heldAcks: number[];
+
   // last screencast frame, kept to re-send a full frame on request
   lastB64?: string;
   resendFullFrame: () => void;
@@ -93,6 +96,18 @@ export function releaseDeviceAsync(id: string): Promise<void> {
   return _enqueue(id, () => _stopScreencastIfUnusedAsync(id));
 }
 
+// Chrome stops producing screencast frames while a few are unacknowledged. Acking a frame
+// only once it is used (or dropped) moves the minFrameInterval / congestion / FrameAck
+// throttling into Chrome, so it doesn't encode and ship frames that would be thrown away.
+// Every path that drops the pending frame must call this, or the screencast stalls.
+function _releaseScreencastAcks(dev: DeviceSession): void {
+  if (dev.heldAcks.length === 0) return;
+  const acks = dev.heldAcks;
+  dev.heldAcks = [];
+  for (const sessionId of acks)
+    dev.cdp.send('Page.screencastFrameAck', { sessionId }).catch(() => { });
+}
+
 async function _stopScreencastIfUnusedAsync(id: string): Promise<void> {
   const device = devices.get(id);
   if (!device || !device.screencasting || broadcaster.getClientCount(id) > 0) return;
@@ -101,6 +116,7 @@ async function _stopScreencastIfUnusedAsync(id: string): Promise<void> {
   if (device.throttleTimer) clearTimeout(device.throttleTimer);
   device.throttleTimer = undefined;
   device.pendingB64 = undefined;
+  _releaseScreencastAcks(device);
   await device.cdp.send('Page.stopScreencast').catch(() => { });
   console.log(`[device] Screencast stopped for ${id}: no clients`);
 }
@@ -225,6 +241,7 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
     lastProcessedMs: undefined,
     processing: false,
     processedB64: undefined,
+    heldAcks: [],
     lastB64: undefined,
     resendFullFrame: () => { },
     acks: new FrameAckWindow(ACK_WINDOW_FRAMES, ACK_TIMEOUT_MS),
@@ -243,7 +260,10 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
     const dev = newDevice;
     dev.throttleTimer = undefined;
 
-    if (!dev.pendingB64 || !isCurrent()) return;
+    if (!dev.pendingB64 || !isCurrent()) {
+      _releaseScreencastAcks(dev);
+      return;
+    }
     if (broadcaster.isCongested(id)) {
       // Keep only the newest frame until the client catches up; the diff is computed
       // against the last frame actually sent, so skipping frames is safe.
@@ -261,6 +281,8 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
     const b64 = dev.pendingB64;
     const frameAtMs = dev.pendingAtMs ?? Date.now();
     dev.pendingB64 = undefined;
+    // Chrome can prepare the next frame while this one is processed.
+    _releaseScreencastAcks(dev);
     if (b64 === dev.processedB64) return;
 
     // Frames must be processed one at a time: FrameProcessor diffs against the previous
@@ -355,12 +377,14 @@ async function _ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<Device
   };
 
   session.on('Page.screencastFrame', async (evt: any) => {
-    // ACK immediately to keep producer running
-    session.send('Page.screencastFrameAck', { sessionId: evt.sessionId }).catch(() => { });
-
     newDevice.lastB64 = evt.data;
-    if (broadcaster.getClientCount(newDevice.deviceId) === 0)
+    if (broadcaster.getClientCount(newDevice.deviceId) === 0 || !isCurrent()) {
+      // Nobody will consume it; the screencast is being stopped.
+      session.send('Page.screencastFrameAck', { sessionId: evt.sessionId }).catch(() => { });
       return;
+    }
+    // Acked once consumed, see _releaseScreencastAcks.
+    newDevice.heldAcks.push(evt.sessionId);
     newDevice.lastActive = Date.now();
     newDevice.pendingB64 = evt.data;
     newDevice.pendingAtMs = Date.now();
@@ -442,6 +466,7 @@ async function deleteDeviceAsync(device: DeviceSession, crashed = false) {
   if (device.throttleTimer)
     clearTimeout(device.throttleTimer);
   device.selfTestRunner.stop();
+  if (!crashed) _releaseScreencastAcks(device);
 
   // A crashed tab doesn't answer, so don't wait for the command to time out.
   if (!crashed && device.screencasting)
