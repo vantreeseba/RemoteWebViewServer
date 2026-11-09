@@ -47,7 +47,7 @@ The server does not include a built-in on-screen keyboard, but you can inject an
 - beta — newest pre-release (rolling)
 - Semantic versions: X.Y.Z, plus convenience tags X.Y, X on stable releases
 
-You can pin a stable release (`1.4.0`) or track channels (`latest`, `beta`) depending on your deployment strategy.
+You can pin a stable release (`1.5.0`) or track channels (`latest`, `beta`) depending on your deployment strategy.
 
 ## Docker Compose Example
 
