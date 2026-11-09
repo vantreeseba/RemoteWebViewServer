@@ -5,7 +5,7 @@ import { FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "./protocol.js";
 // split into the parts of the pipeline. All in ms.
 export type StepResult = {
   latencyMs: number;
-  browserMs: number;  // change -> frame from the screencast (render, PNG encode, CDP)
+  browserMs: number;  // change -> frame from the browser (render, encode, CDP)
   serverMs: number;   // frame received -> sent (waiting + decode, diff, JPEG encode)
   networkMs: number;  // sent -> confirmed by the device, minus its own decode and draw
   deviceMs: number;   // decode + draw on the device, as the device reports it

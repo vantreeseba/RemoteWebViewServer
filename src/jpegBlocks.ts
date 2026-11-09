@@ -136,15 +136,17 @@ function extend(v: number, s: number): number {
 }
 
 // Decodes a JPEG to quantized DCT coefficients. Returns null for unsupported or corrupt input.
-export function decodeJpegBlocks(buf: Buffer): JpegBlocks | null {
+// `out` is reused for the coefficients when it has the right size (it is overwritten even when
+// decoding fails), so frames don't allocate a new MB-sized array each.
+export function decodeJpegBlocks(buf: Buffer, out?: Int16Array): JpegBlocks | null {
   try {
-    return _decode(buf);
+    return _decode(buf, out);
   } catch {
     return null;
   }
 }
 
-function _decode(buf: Buffer): JpegBlocks | null {
+function _decode(buf: Buffer, out?: Int16Array): JpegBlocks | null {
   if (buf.length < 4 || buf[0] !== 0xFF || buf[1] !== 0xD8) return null;
 
   const dqt: Buffer[] = [];
@@ -202,7 +204,7 @@ function _decode(buf: Buffer): JpegBlocks | null {
         if (!dc || !ac) return null;
         dcSel.push(dc); acSel.push(ac);
       }
-      return _decodeScan(buf, segEnd, width, height, components, dcSel, acSel, dqt);
+      return _decodeScan(buf, segEnd, width, height, components, dcSel, acSel, dqt, out);
     } else if (marker === 0xD9) {
       return null;
     }
@@ -212,7 +214,7 @@ function _decode(buf: Buffer): JpegBlocks | null {
 
 function _decodeScan(
   buf: Buffer, start: number, width: number, height: number, components: JpegComponent[],
-  dcSel: HuffDecodeTable[], acSel: HuffDecodeTable[], dqt: Buffer[],
+  dcSel: HuffDecodeTable[], acSel: HuffDecodeTable[], dqt: Buffer[], out?: Int16Array,
 ): JpegBlocks | null {
   let hmax = 0, vmax = 0, blocksPerMcu = 0;
   for (const c of components) {
@@ -226,7 +228,9 @@ function _decodeScan(
   const mcusX = Math.ceil(width / mcuW), mcusY = Math.ceil(height / mcuH);
   const mcuCount = mcusX * mcusY;
 
-  const coef = new Int16Array(mcuCount * blocksPerMcu * 64);
+  const n = mcuCount * blocksPerMcu * 64;
+  // Coefficients after a block's end-of-block code are zero and never written.
+  const coef = out?.length === n ? out.fill(0) : new Int16Array(n);
   const rd = new BitReader(buf, start);
   const pred = new Int32Array(components.length);
   // Component index of each block in an MCU.
@@ -311,8 +315,9 @@ function transposeDqt(seg: Buffer): Buffer {
 
 // Rotates the image clockwise by moving and sign-flipping DCT coefficients; no pixel is
 // decoded, so nothing is lost. Returns null when the image isn't a whole number of MCUs:
-// the padding of the right/bottom edge would end up on the left/top.
-export function rotateJpegBlocks(img: JpegBlocks, rotation: 90 | 180 | 270): JpegBlocks | null {
+// the padding of the right/bottom edge would end up on the left/top. `out` is reused for the
+// result when it has the right size and isn't `img.coef`.
+export function rotateJpegBlocks(img: JpegBlocks, rotation: 90 | 180 | 270, out?: Int16Array): JpegBlocks | null {
   if (img.width % img.mcuW !== 0 || img.height % img.mcuH !== 0) return null;
   const quarter = rotation !== 180;
   const { src: map, neg } = COEF_MAPS[rotation];
@@ -321,7 +326,8 @@ export function rotateJpegBlocks(img: JpegBlocks, rotation: 90 | 180 | 270): Jpe
   const outMcusX = quarter ? img.mcusY : img.mcusX;
   const bpm = img.blocksPerMcu;
   const coef = img.coef;
-  const out = new Int16Array(coef.length);
+  // Every value is written below, so a reused array needs no clearing.
+  const dst = out && out.length === coef.length && out !== coef ? out : new Int16Array(coef.length);
 
   let compOff = 0;
   for (let ci = 0; ci < comps.length; ci++) {
@@ -338,7 +344,7 @@ export function rotateJpegBlocks(img: JpegBlocks, rotation: 90 | 180 | 270): Jpe
         const d = ((((oy / ov) | 0) * outMcusX + ((ox / oh) | 0)) * bpm + compOff + (oy % ov) * oh + (ox % oh)) * 64;
         for (let k = 0; k < 64; k++) {
           const c = coef[s + map[k]];
-          out[d + k] = neg[k] ? -c : c;
+          dst[d + k] = neg[k] ? -c : c;
         }
       }
     }
@@ -354,7 +360,7 @@ export function rotateJpegBlocks(img: JpegBlocks, rotation: 90 | 180 | 270): Jpe
     mcusY: quarter ? img.mcusX : img.mcusY,
     components: outComps,
     blocksPerMcu: bpm,
-    coef: out,
+    coef: dst,
     dqt: quarter ? img.dqt.map(transposeDqt) : img.dqt,
   };
 }

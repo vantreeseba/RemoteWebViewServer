@@ -61,6 +61,8 @@ export class FrameProcessor {
   // Last processed frame. Every tile that differed from its predecessor was sent,
   // so this is exactly what the client shows. Must not be mutated by the caller.
   private _prevFrame?: RGB | JpegFrame;
+  // Coefficients of the JPEG frame before _prevFrame; nothing references them any more.
+  private _spareCoef?: Int16Array;
   private _iter = 0;
   private _fullFrameRequested = false;
 
@@ -71,6 +73,14 @@ export class FrameProcessor {
   public requestFullFrame(): void {
     this._iter = 0;
     this._fullFrameRequested = true;
+  }
+
+  // An array the next frame's DCT coefficients can be decoded into (see decodeJpegBlocks),
+  // so each frame doesn't allocate a new one. Undefined when there is none to spare.
+  public takeSpareCoefficients(): Int16Array | undefined {
+    const coef = this._spareCoef;
+    this._spareCoef = undefined;
+    return coef;
   }
 
   // True if tiles can be cut out of this JPEG frame directly: the tile grid has to fall on
@@ -114,6 +124,8 @@ export class FrameProcessor {
     const parts = await Promise.all(boxes.map(b => this._encodeFittingAsync(frame, b, chosenEncoding)));
     const rects = parts.flat();
 
+    if (prev && isJpegFrame(prev) && (!isJpegFrame(frame) || prev.blocks.coef !== frame.blocks.coef))
+      this._spareCoef = prev.blocks.coef;
     this._prevFrame = frame;
     this._iter++;
     return { rects, isFullFrame: doFull, encoding: chosenEncoding };

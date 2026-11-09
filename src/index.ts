@@ -5,7 +5,7 @@ import { makeConfigFromParams, logDeviceConfig, DeviceConfig, readInjectScriptCo
 import { getInjectScriptFromUrl } from "./scriptLoader.js";
 import { broadcaster, ensureDeviceAsync, releaseDeviceAsync, getDevice, cleanupIdleAsync, DeviceSession } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
-import { bootstrapAsync } from './browser.js';
+import { bootstrapAsync, closeBrowserAsync } from './browser.js';
 import { getRoot } from './cdpRoot.js';
 import { MsgType, parseFrameAckPacket } from './protocol.js';
 
@@ -37,11 +37,24 @@ setInterval(() => {
 const injectCfg = readInjectScriptConfig();
 if (injectCfg.url) getInjectScriptFromUrl(injectCfg).catch(() => { });
 
+// Close the browser gracefully so it saves its profile. Also needed in Docker: Node runs as
+// PID 1 there, and PID 1 ignores SIGTERM unless it has a handler.
+let shuttingDown = false;
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[server] ${signal}, closing the browser`);
+    closeBrowserAsync().finally(() => process.exit(0));
+  });
+}
+
 await bootstrapAsync();
 
 // Every device lives in this browser, so without it there is nothing to recover in-process.
 // Exit and let Docker / the HA supervisor restart the container with a fresh browser.
 getRoot()?.onClose(() => {
+  if (shuttingDown) return;
   console.error("[server] Lost the CDP connection to the browser, exiting");
   process.exit(1);
 });

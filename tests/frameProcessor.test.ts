@@ -198,6 +198,31 @@ describe("FrameProcessor", () => {
       expect((await fpJpg.processFrameAsync(await jpegFrame(next))).rects).toHaveLength(0);
     });
 
+    it("hands out an array only once no frame it holds uses it", async () => {
+      const fp = new FrameProcessor(DEFAULT_CFG);
+      const f1 = await jpegFrame(noiseFrame(320, 240, 1));
+      const f2 = await jpegFrame(noiseFrame(320, 240, 2));
+      expect(fp.takeSpareCoefficients()).toBeUndefined();
+      await fp.processFrameAsync(f1);
+      // f1 is what the next frame is diffed against.
+      expect(fp.takeSpareCoefficients()).toBeUndefined();
+      await fp.processFrameAsync(f2);
+      expect(fp.takeSpareCoefficients()).toBe(f1.blocks.coef);
+      expect(fp.takeSpareCoefficients()).toBeUndefined();
+
+      // Decoding into the spare array still diffs correctly against the held frame.
+      await fp.processFrameAsync(await jpegFrame(noiseFrame(320, 240, 3)));
+      const spare = fp.takeSpareCoefficients()!;
+      const held = noiseFrame(320, 240, 3);
+      const changed = paint(held, 100, 70, 20, 10, [255, 0, 0]);
+      const jpg = await sharp(changed.data, { raw: { width: 320, height: 240, channels: BPP } })
+        .jpeg({ quality: 85, chromaSubsampling: "4:2:0" }).toBuffer();
+      const blocks = decodeJpegBlocks(jpg, spare)!;
+      expect(blocks.coef).toBe(spare);
+      const out = await fp.processFrameAsync({ width: 320, height: 240, jpeg: jpg, blocks, rotation: 0 });
+      expect(out.rects.map(r => [r.x, r.y, r.w, r.h])).toEqual([[96, 64, 32, 32]]);
+    });
+
     it("sends a full frame when switching between pixel and JPEG frames", async () => {
       const fp = new FrameProcessor(DEFAULT_CFG);
       const f = solidFrame(320, 240, [1, 2, 3]);

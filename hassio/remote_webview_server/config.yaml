@@ -32,6 +32,7 @@ options:
   screencast_format: "jpeg"
   screencast_quality: 90
   screencast_passthrough: true
+  capture_mode: "screencast"
   max_bytes_per_message: 61440
   ws_port: 8081
   debug_port: 9221
@@ -56,6 +57,7 @@ schema:
   screencast_format: "list(jpeg|png)"
   screencast_quality: "int(1,100)"
   screencast_passthrough: bool
+  capture_mode: "list(screencast|on-demand)"
   max_bytes_per_message: int
   ws_port: int
   debug_port: int

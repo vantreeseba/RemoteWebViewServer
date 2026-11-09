@@ -53,6 +53,10 @@ export class SelfTestRunner {
   private _broadcaster: DeviceBroadcaster;
   private _dev?: DeviceSession;
   private _bound = false;
+  // Runtime events are on for the binding. They stay on while the test or its result page is
+  // shown, and are turned off after: otherwise every console message of the dashboard shown
+  // next would be sent to the server.
+  private _runtimeOn = false;
   private _active = false;
   private _stage?: StageResult;
   private _results: StageResult[] = [];
@@ -80,6 +84,7 @@ export class SelfTestRunner {
       });
       this._bound = true;
     }
+    this._runtimeOn = true;
     await dev.cdp.send("Runtime.enable");
     await dev.cdp.send("Runtime.addBinding", { name: BINDING });
 
@@ -102,7 +107,7 @@ export class SelfTestRunner {
     // Recorded even when late: the change really took that long.
     e.stage.steps.push({
       latencyMs: now - e.stepStartMs,
-      // change on the page -> frame from the screencast (render + PNG encode + CDP)
+      // change on the page -> frame from the browser (render + encode + CDP)
       browserMs: Math.max(0, e.frameAtMs - e.stepStartMs),
       // waiting for the pipeline + decode, diff and JPEG encode
       serverMs: Math.max(0, e.sentAtMs - e.frameAtMs),
@@ -115,8 +120,22 @@ export class SelfTestRunner {
     if (e.seq === this._stepSeq) this._continuePage();
   }
 
+  // Called for every main-frame navigation of the device's page.
+  public handleNavigation(url: string): void {
+    // While a test runs the page is the test page; only leaving the result page ends it.
+    if (!this._active && !url.startsWith(PAGE_URL)) this._releaseRuntime();
+  }
+
+  private _releaseRuntime(): void {
+    if (!this._runtimeOn || !this._dev) return;
+    this._runtimeOn = false;
+    this._dev.cdp.send("Runtime.removeBinding", { name: BINDING }).catch(() => { });
+    this._dev.cdp.send("Runtime.disable").catch(() => { });
+  }
+
   public stop(): void {
     if (this._active) console.log(`[self-test] Stopped`);
+    this._releaseRuntime();
     this._active = false;
     this._stage = undefined;
     this._results = [];

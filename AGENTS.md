@@ -30,9 +30,10 @@ RemoteWebViewServer/
 ├── src/
 │   ├── index.ts           # Entry point: WS server, message dispatch, health endpoint, idle cleanup
 │   ├── config.ts          # DeviceConfig: query params > env fallbacks > DEFAULTS; per-device config store
-│   ├── browser.ts         # Launches headless Chromium (persistent context) and connects CDP
+│   ├── browser.ts         # Spawns headless Chromium, connects CDP, per-tab defaults, graceful close
 │   ├── cdpRoot.ts         # Minimal raw CDP client (root connection + flattened sessions)
 │   ├── deviceManager.ts   # DeviceSession lifecycle: create target, screencast, throttle, idle cleanup
+│   ├── beginFrameLoop.ts  # CAPTURE_MODE=on-demand: issues frames, screenshots only changed pages
 │   ├── frameProcessor.ts  # Tile grid diffing, full/partial frame decision, JPEG encoding
 │   ├── jpegBlocks.ts      # JPEG ↔ DCT coefficients: lossless tile crops of screencast frames
 │   ├── broadcaster.ts     # Per-device client sets, ordered frame queue, chunked send
@@ -56,18 +57,37 @@ RemoteWebViewServer/
 
 - **One Chromium, many tabs**: `browser.ts` starts (or reuses) a single headless
   Chromium exposing CDP on `DEBUG_PORT`. Each connected device id gets its own
-  browser target (tab) created through the raw CDP root in `cdpRoot.ts` —
-  Playwright is only used to launch the browser, never for page automation.
+  browser target (tab) created through the raw CDP root in `cdpRoot.ts`.
+  Chromium is spawned directly, with Playwright's default switches copied into
+  `browser.ts`; Playwright only locates the installed binary. A Playwright launch
+  stays attached and instruments every tab, which cost 20–45% extra CPU.
+  `preparePageAsync` re-applies what Playwright used to set per tab (focus
+  emulation, `BROWSER_LOCALE`, default fonts, auto-dismissed dialogs).
+  SIGINT/SIGTERM/SIGHUP close the browser gracefully (`closeBrowserAsync`) so
+  the profile is saved.
 - **Device lifecycle** (`deviceManager.ts`): `ensureDeviceAsync(id, cfg)` reuses
   an existing session when the config is unchanged (and requests a full frame),
   or closes the tab and creates a new one when the client reconnects with new
-  params. Idle sessions are cleaned up after 5 minutes by a 60s interval timer;
-  the screencast is paused while a device has no clients.
-- **Frame pipeline**: `Page.screencastFrame` (JPEG by default, PNG via
+  params. Idle sessions are cleaned up after 5 minutes by a 60s interval timer.
+  While a device has no clients its screencast is stopped and its tab hidden
+  (window minimized with focus emulation off, since a focused page stays
+  visible): it stops rendering but keeps its scripts and WebSockets, so the
+  dashboard is current on reconnect. Freezing is the fallback when the window
+  can't be minimized; a frozen page's WebSockets are closed.
+- **Capture modes** (`CAPTURE_MODE`, browser-wide): `screencast` (default)
+  as above. `on-demand` launches the headless shell with begin-frame control
+  (`src/beginFrameLoop.ts`): the tab renders only when the server issues a
+  frame, polled every `minFrameInterval` while clients are connected and not at
+  all without them. Cheaper for pages that animate constantly, more expensive
+  and slower for static ones. Touches must request a frame
+  (`DeviceSession.requestFrame`), or they wait for the next one.
+- **Frame pipeline**: `Page.screencastFrame` or an on-demand screenshot (JPEG by default, PNG via
   `SCREENCAST_FORMAT`; base64) → hold the ACK until the frame is consumed or
   dropped (`_releaseScreencastAcks`; acked at once when nobody is connected) → trailing
   throttle by `minFrameInterval` → wait while the client's socket is congested
-  or its `FrameAck` window is full → skip frames identical to the last
+  or its `FrameAck` window is full (a congested device is woken by
+  `broadcaster.onceUncongested` once its socket has written everything, not by
+  polling) → skip frames identical to the last
   processed one → either (JPEG, tile size a multiple of 16, frame already
   device-sized, and for rotation a frame that is a whole number of 16 px
   MCUs) decode to DCT coefficients only (`src/jpegBlocks.ts`), rotate them
@@ -117,7 +137,7 @@ docker build -t remote-webview-server -f dockerfile .
 ```
 
 The server needs a Chromium-capable environment: `playwright-core` resolves a
-Playwright-managed Chromium (from `PLAYWRIGHT_BROWSERS_PATH` /
+Playwright-managed Chromium headless shell (falling back to full Chromium) (from `PLAYWRIGHT_BROWSERS_PATH` /
 `~/.cache/ms-playwright`), never a system-installed browser — install one
 locally with `npx playwright install chromium`; in Docker the Playwright base
 image provides it. Key ports: `WS_PORT` 8081 (stream), `HEALTH_PORT` 18080,

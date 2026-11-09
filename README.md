@@ -68,6 +68,7 @@ services:
       SCREENCAST_FORMAT: jpeg # how Chromium hands frames to the server: jpeg (default, cheaper) or png (lossless)
       SCREENCAST_QUALITY: 90  # jpeg capture quality when tiles have to be re-encoded (tile size not a multiple of 16, or a rotated display whose size isn't)
       SCREENCAST_PASSTHROUGH: true # cut changed tiles out of Chromium's JPEG frames instead of compressing them a second time
+      CAPTURE_MODE: screencast # screencast (default) or on-demand: Chromium renders only the frames sent; less browser CPU for pages that animate constantly, but a few % more for mostly static ones, and updates show up ~40 ms later
       MAX_BYTES_PER_MESSAGE: 14336
       WS_PORT: 8081
       DEBUG_PORT: 9221 # internal debug port

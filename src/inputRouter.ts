@@ -57,22 +57,31 @@ export class InputRouter {
       const cssY = rotated.y * viewport.height / dev.cfg.height;
       const points = [{ x: cssX, y: cssY, radiusX: 1, radiusY: 1, force: 1, id }];
 
+      // A tab rendering on demand handles touches only on its next frame, and shows their
+      // effect on the one after; ask for both instead of waiting for the frame interval.
+      const touch = async (params: { type: 'touchStart' | 'touchMove' | 'touchEnd'; touchPoints: typeof points }) => {
+        const sent = dev.cdp.send('Input.dispatchTouchEvent', params);
+        dev.requestFrame();
+        await sent;
+        dev.requestFrame();
+      };
+
       switch (kind) {
         case TouchKind.Down:
-          await dev.cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: points });
+          await touch({ type: 'touchStart', touchPoints: points });
           break;
 
         case TouchKind.Move:
-          await dev.cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: points });
+          await touch({ type: 'touchMove', touchPoints: points });
           break;
 
         case TouchKind.Up:
-          await dev.cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+          await touch({ type: 'touchEnd', touchPoints: [] });
           break;
 
         case TouchKind.Tap:
-          await dev.cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: points });
-          await dev.cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+          await touch({ type: 'touchStart', touchPoints: points });
+          await touch({ type: 'touchEnd', touchPoints: [] });
           break;
       }
     } catch (e) {

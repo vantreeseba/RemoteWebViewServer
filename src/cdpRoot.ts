@@ -30,7 +30,9 @@ export class CdpConnection {
   }
 
   static async connect(wsUrl: string, commandTimeoutMs?: number): Promise<CdpConnection> {
-    const ws = new WebSocket(wsUrl);
+    // Chromium offers permessage-deflate and ws accepts it by default: every message, frames
+    // included, would be compressed by Chromium and inflated here, over localhost.
+    const ws = new WebSocket(wsUrl, { perMessageDeflate: false });
     await new Promise<void>((res, rej) => {
       ws.once('open', () => res());
       ws.once('error', rej);

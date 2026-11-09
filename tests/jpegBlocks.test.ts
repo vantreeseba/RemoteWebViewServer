@@ -161,4 +161,33 @@ describe("jpegBlocks", () => {
       expect(rotateJpegBlocks(decodeJpegBlocks(await jpeg(320, 200, "4:2:0"))!, 180)).toBeNull();
     });
   });
+
+  describe("reusing coefficient arrays", () => {
+    it("decodes into a used array exactly as into a fresh one", async () => {
+      const a = decodeJpegBlocks(await jpeg(320, 240, "4:2:0", 85))!;
+      // A different, busier image leaves non-zero values everywhere.
+      const dirty = decodeJpegBlocks(await jpeg(320, 240, "4:2:0", 100))!.coef;
+      const reused = decodeJpegBlocks(await jpeg(320, 240, "4:2:0", 85), dirty)!;
+      expect(reused.coef).toBe(dirty);
+      expect(reused.coef).toEqual(a.coef);
+    });
+
+    it("allocates when the array has the wrong size", async () => {
+      const small = new Int16Array(64);
+      const img = decodeJpegBlocks(await jpeg(320, 240, "4:2:0"), small)!;
+      expect(img.coef).not.toBe(small);
+      expect(img.coef.length).toBe(img.mcusX * img.mcusY * img.blocksPerMcu * 64);
+    });
+
+    it("rotates into a used array exactly as into a fresh one, but never into its input", async () => {
+      const img = decodeJpegBlocks(await jpeg(320, 240, "4:2:0"))!;
+      const dirty = new Int16Array(img.coef.length).fill(-7);
+      for (const r of [90, 180, 270] as const) {
+        const reused = rotateJpegBlocks(img, r, dirty)!;
+        expect(reused.coef).toBe(dirty);
+        expect(reused.coef).toEqual(rotateJpegBlocks(img, r)!.coef);
+      }
+      expect(rotateJpegBlocks(img, 180, img.coef)!.coef).not.toBe(img.coef);
+    });
+  });
 });
